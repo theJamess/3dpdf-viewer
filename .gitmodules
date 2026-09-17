@@ -1,0 +1,3 @@
+[submodule "third_party/nanoPRC"]
+	path = third_party/nanoPRC
+	url = https://github.com/mvrhel/nanoPRC.git

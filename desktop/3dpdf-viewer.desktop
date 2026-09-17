@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=3D PDF Viewer
+Comment=View and rotate 3D models embedded in PDF files
+Exec=REPO_ROOT/bin/3dpdf-view %f
+Terminal=false
+Categories=Graphics;Viewer;3DGraphics;
+MimeType=application/pdf;

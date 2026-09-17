@@ -1,0 +1,57 @@
+{
+  "goal": "Build a simple 3D PDF viewer for Ubuntu that supports mouse-driven rotation of embedded 3D models",
+  "phase": "initial build complete, verifying and documenting",
+  "lanes": [
+    {
+      "name": "3dpdf-viewer",
+      "owner_sid": "f718022f",
+      "items": [
+        {
+          "id": "i-scope-decision",
+          "title": "Clarify true embedded-3D (U3D/PRC) vs flat-PDF-in-3D-space",
+          "status": "done",
+          "claimed_by": "f718022f",
+          "source": "user",
+          "notes": "User chose true embedded 3D models (U3D/PRC), the harder/CAD-style interpretation",
+          "updated": "2026-09-17T04:18:30Z"
+        },
+        {
+          "id": "i-research-decoders",
+          "title": "Research open-source U3D/PRC decoders usable on Linux",
+          "status": "done",
+          "claimed_by": "f718022f",
+          "source": "self",
+          "notes": "No usable U3D decoder found (ningfei/u3d encodes IDTF->U3D only). nanoPRC (github.com/mvrhel/nanoPRC, AGPLv3) parses PRC and ships a working SDL3/OpenGL viewer with PDF loading built in.",
+          "updated": "2026-09-17T04:18:30Z"
+        },
+        {
+          "id": "i-build-viewer",
+          "title": "Vendor nanoPRC as submodule, build nano_prc_viewer, wrap as 3dpdf-view",
+          "status": "done",
+          "claimed_by": "f718022f",
+          "source": "self",
+          "notes": "third_party/nanoPRC pinned @ c6f7c9e. bin/3dpdf-view launcher + scripts/setup.sh + .desktop entry. Verified render (batch mode) and interactive mouse-drag rotation under Xvfb for cube/cylinder/triangle examples.",
+          "updated": "2026-09-17T04:18:30Z"
+        },
+        {
+          "id": "i-docs-license",
+          "title": "Document scope/limitations (no U3D support) and AGPLv3 licensing",
+          "status": "done",
+          "claimed_by": "f718022f",
+          "source": "self",
+          "notes": "README.md, LICENSE (AGPL-3.0 full text), THIRD_PARTY_NOTICES.md",
+          "updated": "2026-09-17T04:18:30Z"
+        },
+        {
+          "id": "i-commit-push",
+          "title": "Commit and push to GitLab origin",
+          "status": "in-progress",
+          "claimed_by": "f718022f",
+          "source": "self",
+          "updated": "2026-09-17T04:18:30Z"
+        }
+      ]
+    }
+  ],
+  "updated": "2026-09-17T04:18:30Z"
+}

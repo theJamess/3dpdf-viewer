@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Simple 3D PDF viewer launcher for Ubuntu.
+#
+# Opens a PDF that has an embedded PRC 3D model (a "3D PDF" as produced by
+# CAD/engineering tools such as Tetra4D, 3D-Tool, SolidWorks' 3D-PDF export,
+# CAD Exchanger, etc.) in an interactive viewer. Drag with the left mouse
+# button to rotate the model; scroll to zoom.
+#
+# Usage:
+#   3dpdf-view [file.pdf]
+#
+# If no file is given, a file-picker dialog is shown (requires zenity).
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VIEWER_BIN="$REPO_ROOT/third_party/nanoPRC/build/bin/nano_prc_viewer"
+
+if [[ ! -x "$VIEWER_BIN" ]]; then
+    echo "3dpdf-view: viewer binary not found at $VIEWER_BIN" >&2
+    echo "Run '$REPO_ROOT/scripts/setup.sh' first to install dependencies and build it." >&2
+    exit 1
+fi
+
+FILE="${1:-}"
+
+if [[ -z "$FILE" ]]; then
+    if command -v zenity >/dev/null 2>&1; then
+        FILE="$(zenity --file-selection --title="Open a 3D PDF" --file-filter="PDF files | *.pdf *.PDF" 2>/dev/null || true)"
+        if [[ -z "$FILE" ]]; then
+            echo "3dpdf-view: no file selected." >&2
+            exit 1
+        fi
+    else
+        echo "Usage: 3dpdf-view <file.pdf>" >&2
+        echo "(install 'zenity' to get a graphical file picker when no argument is given)" >&2
+        exit 1
+    fi
+fi
+
+if [[ ! -f "$FILE" ]]; then
+    echo "3dpdf-view: file not found: $FILE" >&2
+    exit 1
+fi
+
+# Resolve to an absolute path before changing directory below.
+FILE="$(cd "$(dirname "$FILE")" && pwd)/$(basename "$FILE")"
+
+# Run from the viewer's own bin dir so it finds/writes its viewer.ini there
+# instead of cluttering the caller's working directory.
+cd "$REPO_ROOT/third_party/nanoPRC/build/bin"
+exec "$VIEWER_BIN" "$FILE" "${@:2}"
