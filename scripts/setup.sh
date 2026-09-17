@@ -8,11 +8,26 @@ NANOPRC_DIR="$REPO_ROOT/third_party/nanoPRC"
 BUILD_DIR="$NANOPRC_DIR/build"
 
 echo "==> Installing build dependencies (apt, needs sudo)"
+# NOTE: we do NOT depend on the "libsdl3-dev" apt package -- it's very new
+# and isn't in the repos of most current Ubuntu releases (22.04/24.04 LTS
+# included). nanoPRC's CMake build compiles SDL3 itself from the vendored
+# thirdparty/SDL submodule, so what we actually need are SDL3's own Linux
+# *build* dependencies (per https://wiki.libsdl.org/SDL3/README-linux),
+# not a prebuilt SDL3 package.
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
-    cmake build-essential \
-    libsdl3-dev libglu1-mesa-dev libpng-dev libjpeg-dev zlib1g-dev libxtst-dev \
-    zenity
+    cmake build-essential git pkg-config \
+    libpng-dev libjpeg-dev zlib1g-dev zenity \
+    libasound2-dev libpulse-dev libjack-dev libsndio-dev \
+    libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+    libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
+    libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libglu1-mesa-dev \
+    libdbus-1-dev libudev-dev libusb-1.0-0-dev
+# Newer, Ubuntu-22.04+-only additions (Wayland/pipewire/io_uring support) --
+# best-effort, since package names/availability vary more across releases.
+sudo apt-get install -y -qq \
+    libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev \
+    || echo "    (skipped one or more optional Wayland/pipewire packages -- not fatal)"
 
 echo "==> Fetching nanoPRC submodules"
 cd "$REPO_ROOT"
