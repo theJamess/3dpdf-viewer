@@ -21,6 +21,12 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
     `src/prc_api.c`'s PRC "prototype" transform composition that could
     render some parts of a multi-part assembly detached from the rest (see
     README.md's "Fixed" section).
+  - `patches/0003-ui-improvements.patch` fixes the pan direction and a
+    zoom-drift bug from 0001, and adds Reset View, Save Screenshot, an
+    on-screen control-hint caption, and a cross-section clipping plane
+    (README.md's "Controls" section), touching
+    `demos/viewer/src/main.cpp`, `scene.{h,cpp}`, `mesh.{h,cpp}`, and
+    `demos/viewer/shaders/generic.frag`.
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,

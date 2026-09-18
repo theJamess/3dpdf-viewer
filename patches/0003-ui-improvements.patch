@@ -1,0 +1,482 @@
+From a4bb6ab3a088d5146d8a61f5a2294948edbfbc3d Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Fri, 18 Sep 2026 17:27:34 +0000
+Subject: [PATCH] UI/UX pass: fix zoom drift, add reset/screenshot/section
+
+- Mouse-wheel zoom scaled the model around world origin, not around
+  wherever the model currently is. Harmless before pan existed (the
+  model rarely strayed far from origin), but after panning away zoom
+  would visibly fly the model across the screen instead of growing/
+  shrinking in place. Now scales around the model's own current
+  translation.
+- Added Home key / "Reset View" button (Camera tab): puts the camera
+  and model back to their just-loaded state, needed now that pan/zoom
+  can move the model somewhere the user can't easily undo by feel.
+- Added F12 / "Save Screenshot" button (Main tab): saves the current
+  frame to a timestamped PNG, reusing the same encode path batch mode
+  (--output) already had.
+- Added an always-on-screen control-hint caption (toggle: F1), so the
+  mouse/key bindings are discoverable without opening the Debug panel.
+- Added a "Section" tab: a world-space clipping plane (axis + offset +
+  flip) that cuts away the model on one side, so you can see inside an
+  enclosure without hiding individual parts one by one in the existing
+  part-visibility tree. Implemented as a discard in the generic
+  fragment shader, driven by new Scene/MeshShader plumbing.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ demos/viewer/shaders/generic.frag |  10 ++
+ demos/viewer/src/main.cpp         | 195 +++++++++++++++++++++++++-----
+ demos/viewer/src/mesh.cpp         |   7 +-
+ demos/viewer/src/mesh.h           |  16 +++
+ demos/viewer/src/scene.cpp        |   7 ++
+ demos/viewer/src/scene.h          |  17 +++
+ 6 files changed, 223 insertions(+), 29 deletions(-)
+
+diff --git a/demos/viewer/shaders/generic.frag b/demos/viewer/shaders/generic.frag
+index c0e7d30..8a41ff0 100644
+--- a/demos/viewer/shaders/generic.frag
++++ b/demos/viewer/shaders/generic.frag
+@@ -64,6 +64,11 @@ uniform float uAmbientWeight;
+ uniform float uDiffuseWeight;
+ uniform int uDebugMode;
+ 
++/* Cross-section clipping plane, in world space. */
++uniform bool uClipEnabled;
++uniform vec3 uClipNormal;
++uniform float uClipOffset;
++
+ const float kShadowBias = 0.002;
+ const float kNormalEpsilon = 1e-5;
+ const float kDiffuseStrength = 1.15;
+@@ -216,6 +221,11 @@ vec3 calcPointSpecular(PointLight light, vec3 normal, vec3 fragPos,
+ 
+ void main()
+ {
++    if (uClipEnabled && dot(uClipNormal, FragPos) - uClipOffset > 0.0)
++    {
++        discard;
++    }
++
+     if (uDebugMode == 4)
+     {
+         /* Branch visualization:
+diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
+index cf3689c..43a9804 100644
+--- a/demos/viewer/src/main.cpp
++++ b/demos/viewer/src/main.cpp
+@@ -22,6 +22,7 @@
+ #include <limits>
+ #include <cmath>
+ #include <algorithm>
++#include <ctime>
+ 
+ #include <SDL3/SDL.h>
+ 
+@@ -92,8 +93,16 @@ static int _mouse_up_x, _mouse_up_y; /* Needed to maintain mouse pos for trackba
+ static Camera _camera;
+ static Product *_selectedProduct = nullptr;
+ 
++/* Captured once after the initial auto-frame, so "Reset View" (Home key or
++   the Camera tab button) can put the camera and model back to their
++   just-loaded state after the user has rotated/panned/zoomed/flown around. */
++static Vector3 g_initialCameraPos = Vector3(0.0f, 0.0f, 0.0f);
++static float g_initialCameraPitch = 0.0f;
++static float g_initialCameraYaw = 0.0f;
++
+ static void run(Config &config, SDL_Window *window, const char *file, bool headless = false, const char *output_file = NULL, bool memoryLeakCheck = false);
+ static bool debugMenu(float time, float deltaTime);
++static void resetView();
+ 
+ struct PickResult
+ {
+@@ -442,6 +451,62 @@ static void drawNormalDebugOverlay()
+     ImGui::End();
+ }
+ 
++/* Always-visible, unobtrusive reminder of the mouse controls -- so a first-
++   time user doesn't have to open the Debug panel just to learn how to look
++   around. Toggled off with F1 for anyone who wants a clean screenshot. */
++static bool g_showControlHints = true;
++static bool g_screenshotRequested = false;
++
++static void drawControlHintsOverlay(int windowHeight)
++{
++    if (!g_showControlHints)
++        return;
++
++    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
++        ImGuiWindowFlags_AlwaysAutoResize |
++        ImGuiWindowFlags_NoMove |
++        ImGuiWindowFlags_NoSavedSettings |
++        ImGuiWindowFlags_NoFocusOnAppearing |
++        ImGuiWindowFlags_NoNav |
++        ImGuiWindowFlags_NoInputs;
++
++    ImGui::SetNextWindowPos(ImVec2(10.0f, (float)windowHeight - 10.0f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
++    ImGui::SetNextWindowBgAlpha(0.35f);
++
++    if (ImGui::Begin("Control Hints", nullptr, flags))
++    {
++        ImGui::Text("Left drag: rotate | Middle drag: pan | Wheel: zoom | Home: reset view");
++        ImGui::Text("Ctrl+Left click: pick | F12: screenshot | F1: hide this");
++    }
++    ImGui::End();
++}
++
++/* Reads back the current framebuffer and writes it to a PNG. Shared by
++   batch-mode (--output) and the interactive F12/"Save Screenshot" action. */
++static bool saveScreenshotPNG(const char *path, int w, int h)
++{
++    int channels = 3; // RGB
++    int stride = channels * w;
++    stride += (stride % 4) ? (4 - stride % 4) : 0; // Align to 4 bytes
++    unsigned char *pixels = new unsigned char[stride * h];
++
++    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels);
++
++    // Flip image vertically (OpenGL's origin is bottom-left, image formats use top-left)
++    unsigned char *flipped = new unsigned char[stride * h];
++    for (int y = 0; y < h; y++)
++    {
++        memcpy(flipped + y * stride, pixels + (h - 1 - y) * stride, stride);
++    }
++
++    bool ok = stbi_write_png(path, w, h, channels, flipped, stride) != 0;
++
++    delete[] pixels;
++    delete[] flipped;
++
++    return ok;
++}
++
+ static void initSDL()
+ {
+     if (!SDL_Init(SDL_INIT_VIDEO))
+@@ -790,6 +855,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+     _scene.load(file, &_camera, memoryLeakCheck);
+     _scene.setCameraInitialPosition(&_camera);
+ 
++    g_initialCameraPos = _camera.position();
++    g_initialCameraPitch = _camera.pitch();
++    g_initialCameraYaw = _camera.yaw();
++
+     {
+         float recommendedAmbient = 0.6f;
+         float recommendedDiffuse = 1.0f;
+@@ -893,32 +962,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+         // Capture and save frame if output file is specified
+         if (outputFile)
+         {
+-            int channels = 3; // RGB
+-            int stride = channels * w;
+-            stride += (stride % 4) ? (4 - stride % 4) : 0; // Align to 4 bytes
+-            unsigned char *pixels = new unsigned char[stride * h];
+-
+-            glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+-
+-            // Flip image vertically (OpenGL's origin is bottom-left, image formats use top-left)
+-            unsigned char *flipped = new unsigned char[stride * h];
+-            for (int y = 0; y < h; y++)
+-            {
+-                memcpy(flipped + y * stride, pixels + (h - 1 - y) * stride, stride);
+-            }
+-
+-            // Save as PNG
+-            if (stbi_write_png(outputFile, w, h, channels, flipped, stride))
+-            {
++            if (saveScreenshotPNG(outputFile, w, h))
+                 printf("Batch mode: frame saved to '%s'\n", outputFile);
+-            }
+             else
+-            {
+                 printf("Batch mode: failed to save PNG to '%s'\n", outputFile);
+-            }
+-
+-            delete[] pixels;
+-            delete[] flipped;
+         }
+ 
+         SDL_GL_SwapWindow(window);
+@@ -1037,6 +1084,15 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                 case SDL_SCANCODE_7:
+                     _scene.normalDebugMode() = 7;
+                     break;
++                case SDL_SCANCODE_HOME:
++                    resetView();
++                    break;
++                case SDL_SCANCODE_F1:
++                    g_showControlHints = !g_showControlHints;
++                    break;
++                case SDL_SCANCODE_F12:
++                    g_screenshotRequested = true;
++                    break;
+                 }
+                 break;
+             case SDL_EVENT_KEY_UP:
+@@ -1142,9 +1198,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+         /* Middle-mouse-drag pan: translate the product using the camera's
+            own right()/up() vectors (the same ones WASD movement uses), so
+            the model directly follows the cursor -- drag right and the
+-           model moves right on screen, like grabbing it. The delta is
+-           always measured from the button-down anchor to the live
+-           position (not accumulated frame-to-frame), matching how the
++           model moves right on screen, like grabbing it, rather than
++           panning the camera (which would move the model the opposite way).
++           The delta is always measured from the button-down anchor to the
++           live position (not accumulated frame-to-frame), matching how the
+            arcball recomputes its full rotation from press-start each
+            frame. */
+         if (middleMouseDown && mouseMoved && !mouse_over_debug)
+@@ -1211,11 +1268,23 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+             }
+             else
+             {
+-                /* Make a scaling matrix based upon the wheel value */
++                /* Make a scaling matrix based upon the wheel value, scaled
++                   around the model's own current position (curr_mat's
++                   translation) rather than world origin -- otherwise
++                   zooming after panning away from the origin makes the
++                   model fly off across the screen (growing/shrinking away
++                   from world origin) instead of growing/shrinking in
++                   place where the user left it. */
+                 float scaleFactor = mouse_wheel_delta * 0.1f;
+                 Matrix4 scaleMat = Matrix4(1.0f);
+                 scaleMat = mutil::scale(scaleMat, Vector3(1.0f + scaleFactor, 1.0f + scaleFactor, 1.0f + scaleFactor));
+-                mat = scaleMat * curr_mat;
++
++                Vector3 pivot = Vector3(curr_mat.columns[3].x, curr_mat.columns[3].y, curr_mat.columns[3].z);
++                Matrix4 toPivot = mutil::translate(Matrix4(1.0f), -1.0f * pivot);
++                Matrix4 fromPivot = mutil::translate(Matrix4(1.0f), pivot);
++
++                mat = fromPivot * scaleMat * toPivot;
++                mat = mat * curr_mat;
+             }
+ 
+             _scene.models()[0].setModel(mat);
+@@ -1282,12 +1351,30 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+         mouse_over_debug = debugMenu(time, deltaTime);
+         drawNormalDebugOverlay();
+         drawTrianglePickOverlay();
++        drawControlHintsOverlay(_scene.height());
+ 
+         _camera.upDateView(_scene.models()[0]);
+ 
+         ImGui::Render();
+         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+ 
++        if (g_screenshotRequested)
++        {
++            g_screenshotRequested = false;
++
++            time_t now = time_t(::time(nullptr));
++            struct tm tmNow;
++            localtime_r(&now, &tmNow);
++            char path[64];
++            strftime(path, sizeof(path), "screenshot-%Y%m%d-%H%M%S.png", &tmNow);
++
++            glFinish();
++            if (saveScreenshotPNG(path, _scene.width(), _scene.height()))
++                printf("Screenshot saved to '%s'\n", path);
++            else
++                printf("Failed to save screenshot to '%s'\n", path);
++        }
++
+         SDL_GL_SwapWindow(window);
+     }
+ 
+@@ -1569,6 +1656,18 @@ static void DrawTree(Product &prod)
+     ImGui::PopID();
+ }
+ 
++/* Puts the camera and the model back to how they looked right after the
++   file finished loading and auto-framing, undoing any rotate/pan/zoom/fly
++   the user has done since. */
++static void resetView()
++{
++    _camera.setPosition(g_initialCameraPos);
++    _camera.setPitch(g_initialCameraPitch);
++    _camera.setYaw(g_initialCameraYaw);
++    if (_scene.mumProducts() > 0)
++        _scene.models()[0].setModel(Matrix4(1.0f));
++}
++
+ static bool debugMenu(float time, float deltaTime)
+ {
+     /* Debug menu */
+@@ -1603,6 +1702,13 @@ static bool debugMenu(float time, float deltaTime)
+             ImGui::Text("Hotkeys: 0=Off, 1=Normal RGB, 2=Normal Length, 3=Degenerate Mask, 4=Branch, 5=Front/Back, 6=Raw Normal, 7=Geom vs Imported");
+             ImGui::Text("Triangle Pick: Ctrl+LeftClick (prints vertices/normals)");
+ 
++            ImGui::SeparatorText("Screenshot");
++            if (ImGui::Button("Save Screenshot"))
++                g_screenshotRequested = true;
++            ImGui::SameLine();
++            ImGui::TextDisabled("(or press F12; saved next to the working directory)");
++            ImGui::Checkbox("Show control hints overlay (F1)", &g_showControlHints);
++
+             ImGui::EndTabItem();
+         }
+ 
+@@ -1612,6 +1718,10 @@ static bool debugMenu(float time, float deltaTime)
+             ImGui::InputFloat3("Position", (float *)&_camera.position(), "%.3f", ImGuiInputTextFlags_ReadOnly);
+             ImGui::InputFloat("Pitch", (float *)&_camera.pitch(), 0.0f, 0.0f, "%.3f", ImGuiInputTextFlags_ReadOnly);
+             ImGui::InputFloat("Yaw", (float *)&_camera.yaw(), 0.0f, 0.0f, "%.3f", ImGuiInputTextFlags_ReadOnly);
++            if (ImGui::Button("Reset View"))
++                resetView();
++            ImGui::SameLine();
++            ImGui::TextDisabled("(or press Home)");
+ 
+             ImGui::SeparatorText("Projection");
+             ImGui::SliderFloat("Field of View", (float *)&_camera.fov(), 1.0f, 179.0f, "%.3f");
+@@ -1689,6 +1799,35 @@ static bool debugMenu(float time, float deltaTime)
+             ImGui::EndTabItem();
+         }
+ 
++        if (ImGui::BeginTabItem("Section"))
++        {
++            ImGui::TextWrapped("Cuts away the model on one side of a plane, "
++                "to see inside an enclosure without hiding individual parts.");
++
++            ImGui::SeparatorText("Clipping Plane");
++            ImGui::Checkbox("Enable", &_scene.clipEnabled());
++
++            const char *axisNames[] = { "X", "Y", "Z" };
++            ImGui::Combo("Axis", &_scene.clipAxis(), axisNames, 3);
++
++            const double *bmin = _scene.bboxMin();
++            const double *bmax = _scene.bboxMax();
++            int axis = _scene.clipAxis();
++            float rangeMin = (float)bmin[axis];
++            float rangeMax = (float)bmax[axis];
++            if (!(rangeMax > rangeMin))
++            {
++                /* Degenerate/invalid bbox on this axis -- fall back to a
++                   generic range so the slider still works. */
++                rangeMin = -100.0f;
++                rangeMax = 100.0f;
++            }
++            ImGui::SliderFloat("Offset", &_scene.clipOffset(), rangeMin, rangeMax);
++            ImGui::Checkbox("Flip Side", &_scene.clipFlip());
++
++            ImGui::EndTabItem();
++        }
++
+         if (ImGui::BeginTabItem("Shadows"))
+         {
+             ShadowMap *shadowMap = _scene.shadowMap();
+diff --git a/demos/viewer/src/mesh.cpp b/demos/viewer/src/mesh.cpp
+index c623178..a48ec33 100644
+--- a/demos/viewer/src/mesh.cpp
++++ b/demos/viewer/src/mesh.cpp
+@@ -138,6 +138,10 @@ void MeshShader::load()
+     uAmbientWeight = _shader.getUniformLocation("uAmbientWeight");
+     uDiffuseWeight = _shader.getUniformLocation("uDiffuseWeight");
+     uDebugMode = _shader.getUniformLocation("uDebugMode");
++
++    uClipEnabled = _shader.getUniformLocation("uClipEnabled");
++    uClipNormal = _shader.getUniformLocation("uClipNormal");
++    uClipOffset = _shader.getUniformLocation("uClipOffset");
+ }
+ 
+ MeshShader::MeshShader() : uModel(-1), uView(-1), uProjection(-1),
+@@ -147,7 +151,8 @@ MeshShader::MeshShader() : uModel(-1), uView(-1), uProjection(-1),
+                            uMaterial_diffuse(-1), uMaterial_specular(-1), uMaterial_shininess(-1), uMaterial_tint(-1),
+                            uMaterial_diffuseMap(-1), uMaterial_hasDiffuseMap(-1), uIsLine(-1), uEnableShadows(-1),
+                            uWireframe(-1), uFullbright(-1), uAmbientWeight(-1), uDiffuseWeight(-1),
+-                           uDebugMode(-1), uVertexMaterial(-1), uMaterial_alpha(-1)
++                           uDebugMode(-1), uVertexMaterial(-1), uMaterial_alpha(-1),
++                           uClipEnabled(-1), uClipNormal(-1), uClipOffset(-1)
+ {
+ }
+ 
+diff --git a/demos/viewer/src/mesh.h b/demos/viewer/src/mesh.h
+index f3b0ee9..390a286 100644
+--- a/demos/viewer/src/mesh.h
++++ b/demos/viewer/src/mesh.h
+@@ -123,6 +123,18 @@ public:
+     inline void setDiffuseWeight(float diffuseWeight) { _shader.setFloat(uDiffuseWeight, diffuseWeight); }
+     inline void setDebugMode(int debugMode) { _shader.setInt(uDebugMode, debugMode); }
+ 
++    /* Cross-section clipping plane, in world space: a fragment is
++       discarded when dot(uClipNormal, FragPos) - uClipOffset > 0. */
++    inline void setClipPlane(bool enabled, const Vector3 &normal, float offset)
++    {
++        _shader.setBool(uClipEnabled, enabled);
++        if (enabled)
++        {
++            _shader.setVector3(uClipNormal, normal);
++            _shader.setFloat(uClipOffset, offset);
++        }
++    }
++
+     void load();
+ 
+     MeshShader();
+@@ -170,6 +182,10 @@ private:
+     int uAmbientWeight;
+     int uDiffuseWeight;
+     int uDebugMode;
++
++    int uClipEnabled;
++    int uClipNormal;
++    int uClipOffset;
+ };
+ 
+ #endif // _MESH_H_
+diff --git a/demos/viewer/src/scene.cpp b/demos/viewer/src/scene.cpp
+index 1f1cbc5..45bcc99 100644
+--- a/demos/viewer/src/scene.cpp
++++ b/demos/viewer/src/scene.cpp
+@@ -1214,6 +1214,13 @@ void Scene::renderModels(Camera *camera) const
+     _meshShader->setDiffuseWeight(_diffuseWeight);
+     _meshShader->setDebugMode(_normalDebugMode);
+ 
++    Vector3 clipNormal(_clipAxis == 0 ? 1.0f : 0.0f,
++        _clipAxis == 1 ? 1.0f : 0.0f,
++        _clipAxis == 2 ? 1.0f : 0.0f);
++    if (_clipFlip)
++        clipNormal = -1.0f * clipNormal;
++    _meshShader->setClipPlane(_clipEnabled, clipNormal, _clipOffset);
++
+     /* Shadow mapping */
+     if (_shadowMap)
+     {
+diff --git a/demos/viewer/src/scene.h b/demos/viewer/src/scene.h
+index e751a76..9a1c09a 100644
+--- a/demos/viewer/src/scene.h
++++ b/demos/viewer/src/scene.h
+@@ -72,6 +72,18 @@ public:
+     constexpr int &normalDebugMode() { return _normalDebugMode; }
+     constexpr int normalDebugMode() const { return _normalDebugMode; }
+ 
++    /* Cross-section clipping plane. Axis is 0=X, 1=Y, 2=Z (world space);
++       flip points the plane's kept side the other way. */
++    constexpr bool &clipEnabled() { return _clipEnabled; }
++    constexpr int &clipAxis() { return _clipAxis; }
++    constexpr float &clipOffset() { return _clipOffset; }
++    constexpr bool &clipFlip() { return _clipFlip; }
++
++    /* World-space bounding box computed at load, for framing sliders like
++       the clip plane's offset range. */
++    constexpr const double *bboxMin() const { return _bbox_min; }
++    constexpr const double *bboxMax() const { return _bbox_max; }
++
+     constexpr DirLight *dirLight() { return &_dirLight; }
+     constexpr const DirLight *dirLight() const { return &_dirLight; }
+ 
+@@ -138,6 +150,11 @@ private:
+     float _diffuseWeight;
+     int _normalDebugMode;
+ 
++    bool _clipEnabled = false;
++    int _clipAxis = 2;
++    float _clipOffset = 0.0f;
++    bool _clipFlip = false;
++
+     DirLight _dirLight;
+     PointLight _pointLight;
+ 
+-- 
+2.47.3
+

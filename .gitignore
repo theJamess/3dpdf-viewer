@@ -1,4 +1,15 @@
 third_party/nanoPRC/build/
 third_party/nanoPRC/build-debug/
 viewer.ini
+imgui.ini
 uploads/
+screenshot-*.png
+
+# Agent-fleet operational bookkeeping (session ids, task tracking) --
+# useful for this VM's own coordination, not part of the project itself.
+ROADMAP.json
+CURRENT.json
+agent-inventory.json
+PRIORITIES.json
+LINKS.json
+SHOWCASE.json

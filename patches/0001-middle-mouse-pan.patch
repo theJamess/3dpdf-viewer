@@ -1,25 +1,25 @@
-From 2e9a36570171948aa91393033318041d457e42d7 Mon Sep 17 00:00:00 2001
+From f5535d6958491d5b00b49c816a56e69dee9e3f86 Mon Sep 17 00:00:00 2001
 From: 3dpdf <3dpdf@users.noreply.github.com>
-Date: Fri, 18 Sep 2026 02:09:35 +0000
+Date: Fri, 18 Sep 2026 16:54:12 +0000
 Subject: [PATCH] Add middle-mouse-button pan to the viewer
 
 Left-drag rotates (arcball) and the wheel zooms by scaling the product
-matrix; middle-drag now pans by translating it in the camera's own
-right/up plane, converted to world space via the same cam2World
-(rotation-only) matrix the arcball uses. The pan delta is measured from
-the button-down anchor to the live cursor position each frame (not
-accumulated), matching how the arcball recomputes its full rotation
-from press-start every frame, and scaled by the orbit-center distance
-and vertical FOV so the model tracks the cursor consistently regardless
-of zoom level.
+matrix; middle-drag now pans by translating it using the camera's own
+right()/up() vectors (the same ones WASD movement uses), so the model
+follows the cursor directly, like grabbing it. The pan delta is
+measured from the button-down anchor to the live cursor position each
+frame (not accumulated), matching how the arcball recomputes its full
+rotation from press-start every frame, and scaled by the orbit-center
+distance and vertical FOV so the model tracks the cursor consistently
+regardless of zoom level.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 ---
- demos/viewer/src/main.cpp | 70 +++++++++++++++++++++++++++++++++++++++
- 1 file changed, 70 insertions(+)
+ demos/viewer/src/main.cpp | 56 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
 
 diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
-index d2e5702..bd80bd6 100644
+index d2e5702..cf3689c 100644
 --- a/demos/viewer/src/main.cpp
 +++ b/demos/viewer/src/main.cpp
 @@ -21,6 +21,7 @@
@@ -30,30 +30,7 @@ index d2e5702..bd80bd6 100644
  
  #include <SDL3/SDL.h>
  
-@@ -789,6 +790,22 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
-     _scene.load(file, &_camera, memoryLeakCheck);
-     _scene.setCameraInitialPosition(&_camera);
- 
-+    if (getenv("NANOPRC_DBG_WORLD_POS"))
-+    {
-+        _scene.models()[0].update();
-+        Product *all = _scene.models();
-+        uint32_t nall = _scene.mumProducts();
-+        for (uint32_t i = 0; i < nall; i++)
-+        {
-+            if (all[i].numMeshes() > 0)
-+            {
-+                Vector4 origin = all[i].localToWorld() * Vector4(0.0f, 0.0f, 0.0f, 1.0f);
-+                fprintf(stderr, "[DBG worldpos] name=%s world=[%g,%g,%g]\n",
-+                    all[i].name() ? all[i].name() : "(null)", origin.x, origin.y, origin.z);
-+            }
-+        }
-+    }
-+
-     {
-         float recommendedAmbient = 0.6f;
-         float recommendedDiffuse = 1.0f;
-@@ -937,6 +954,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+@@ -937,6 +938,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
      int pickX = 0;
      int pickY = 0;
      int mouseX_buttondown, mouseY_buttondown;
@@ -64,7 +41,7 @@ index d2e5702..bd80bd6 100644
      Matrix4 curr_mat;
      Matrix4 transToCenter = Matrix4(1.0f);
      Matrix4 transFromCenter = Matrix4(1.0f);
-@@ -1056,6 +1077,11 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+@@ -1056,6 +1061,11 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
                      mouseX_buttondown = evt.motion.x;
                      mouseY_buttondown = evt.motion.y;
                  }
@@ -76,7 +53,7 @@ index d2e5702..bd80bd6 100644
                  break;
              case SDL_EVENT_MOUSE_WHEEL:
                  curr_mat = _scene.models()[0].model();
-@@ -1067,6 +1093,13 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+@@ -1067,6 +1077,13 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
                      curr_mat = _scene.models()[0].model();
                      mouseDown = true;
                  }
@@ -90,7 +67,7 @@ index d2e5702..bd80bd6 100644
                  break;
              case SDL_EVENT_MOUSE_BUTTON_UP:
                  if (evt.button.button == SDL_BUTTON_LEFT)
-@@ -1091,6 +1124,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+@@ -1091,6 +1108,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
                      }
                      mouseDown = false;
                  }
@@ -101,16 +78,18 @@ index d2e5702..bd80bd6 100644
                  break;
              }
          }
-@@ -1118,6 +1155,39 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+@@ -1118,6 +1139,41 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
          float pitch = _camera.pitch();
          float yaw = _camera.yaw();
  
-+        /* Middle-mouse-drag pan: translate the product in the camera's own
-+           right/up plane, converted to world space via the same cam2World
-+           (rotation-only) matrix the arcball below uses. The delta is always
-+           measured from the button-down anchor to the live position (not
-+           accumulated frame-to-frame), matching how the arcball recomputes
-+           its full rotation from press-start each frame. */
++        /* Middle-mouse-drag pan: translate the product using the camera's
++           own right()/up() vectors (the same ones WASD movement uses), so
++           the model directly follows the cursor -- drag right and the
++           model moves right on screen, like grabbing it. The delta is
++           always measured from the button-down anchor to the live
++           position (not accumulated frame-to-frame), matching how the
++           arcball recomputes its full rotation from press-start each
++           frame. */
 +        if (middleMouseDown && mouseMoved && !mouse_over_debug)
 +        {
 +            int windowWidth, windowHeight;
@@ -125,14 +104,14 @@ index d2e5702..bd80bd6 100644
 +            float distance = (float)(std::fabs(camZCenter) > 1e-6 ? std::fabs(camZCenter) : 10.0);
 +            float worldPerPixel = (2.0f * distance * std::tan(halfFovY)) / (float)std::max(1, windowHeight);
 +
-+            /* +X is screen-right; screen Y grows downward while camera "up"
-+               points the other way, hence the negation on dy. */
-+            Vector4 camSpaceDelta4 = Vector4(dx * worldPerPixel, -dy * worldPerPixel, 0.0f, 0.0f);
-+            Vector4 worldDelta4 = cam2World * camSpaceDelta4;
++            /* +X is screen-right (move along +right()); screen Y grows
++               downward while up() points to screen-up, hence the negation
++               on dy so dragging down moves the model down. */
++            Vector3 worldDelta = (dx * worldPerPixel) * _camera.right() -
++                (dy * worldPerPixel) * _camera.up();
 +
 +            Matrix4 panTrans = Matrix4(1.0f);
-+            panTrans = mutil::translate(panTrans,
-+                Vector3(worldDelta4.x, worldDelta4.y, worldDelta4.z));
++            panTrans = mutil::translate(panTrans, worldDelta);
 +
 +            _scene.models()[0].setModel(panTrans * panCurrMat);
 +            mouseMoved = false;

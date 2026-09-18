@@ -62,14 +62,34 @@ bin/3dpdf-view path/to/model.pdf
 Or run `bin/3dpdf-view` with no arguments to pick a file graphically, or
 launch "3D PDF Viewer" from your applications menu.
 
-**Controls:**
+**Mouse:**
 - **Left-click drag** — rotate/orbit the model (arcball/trackball rotation)
-- **Middle-click drag** — pan the model (added on top of nanoPRC upstream; see
-  `patches/`)
-- **Scroll wheel** — zoom
-- A "Debug" panel is shown in the corner (camera/lighting/render options
-  inherited from the upstream demo viewer); click its title bar to
-  collapse it out of the way.
+- **Middle-click drag** — pan the model (follows the cursor directly, like
+  grabbing it)
+- **Scroll wheel** — zoom in/out, centered on wherever the model currently is
+- **Ctrl + left-click** — pick a triangle (prints its vertices/normals to
+  the terminal)
+
+**Keyboard:**
+- **W/A/S/D**, **Q/E** — fly the camera (forward/left/back/right, down/up);
+  hold **Shift** to move faster
+- **Arrow keys** — turn the camera (pitch/yaw)
+- **Home** — reset the view (undoes rotate/pan/zoom/fly, back to how the
+  file first opened)
+- **F12** — save a screenshot (timestamped PNG, next to the working directory)
+- **F1** — toggle the on-screen control-hint caption
+- **Escape** — quit
+
+A "Debug" panel in the corner exposes camera/lighting/render settings
+inherited from the upstream demo viewer (click its title bar to collapse
+it), plus a **Section** tab (see below) and a per-part visibility tree
+under **Scene**. "Reset View" and "Save Screenshot" are also available as
+buttons there (Camera and Main tabs) for anyone who'd rather click than
+memorize keys.
+
+**Cross-section**: the **Section** tab cuts the model away on one side of a
+plane (pick an axis, slide the offset, optionally flip which side is kept)
+— useful for looking inside an enclosure without hiding parts one at a time.
 
 Three sample 3D PDFs to try are included at
 `third_party/nanoPRC/examples/` (`cube.pdf`, `cylinder.pdf`, `triangle.pdf`).
@@ -81,10 +101,14 @@ after fetching the submodule — they're not part of nanoPRC upstream. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for what this means for
 licensing.
 
-- `patches/0001-middle-mouse-pan.patch` — middle-mouse pan, see "Controls"
-  above.
+- `patches/0001-middle-mouse-pan.patch` — adds middle-mouse-drag panning.
 - `patches/0002-fix-duplicate-transform.patch` — fixes multi-part assemblies
   rendering with some parts detached from the rest (see below).
+- `patches/0003-ui-improvements.patch` — fixes pan direction (0001 shipped
+  it inverted) and a zoom-drift bug (scaling around world origin instead of
+  the model's own position, only visible once panning existed to move the
+  model away from the origin); adds Reset View, Save Screenshot, an
+  on-screen control-hint caption, and the Section (clipping plane) tab.
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 
@@ -118,5 +142,6 @@ should be vs. where it renders).
 
 `screenshots/01-cube.png`, `screenshots/02-rotated-cylinder.png` (mid-rotation,
 via mouse drag), `screenshots/03-triangle.png`, `screenshots/04-panned-cylinder.png`
-(mid-pan, via middle-mouse drag) — all rendered from this repo's own build
-against the bundled example PDFs.
+(mid-pan, via middle-mouse drag), `screenshots/05-cross-section.png` (the
+Section tab's clipping plane cutting into the cube) — all rendered from this
+repo's own build against the bundled example PDFs.

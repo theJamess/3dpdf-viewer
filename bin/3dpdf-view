@@ -3,8 +3,9 @@
 #
 # Opens a PDF that has an embedded PRC 3D model (a "3D PDF" as produced by
 # CAD/engineering tools such as Tetra4D, 3D-Tool, SolidWorks' 3D-PDF export,
-# CAD Exchanger, etc.) in an interactive viewer. Drag with the left mouse
-# button to rotate the model; scroll to zoom.
+# CAD Exchanger, etc.) in an interactive viewer. Left-drag to rotate,
+# middle-drag to pan, scroll to zoom. See README.md for the full control
+# list and the Section (clipping plane) feature.
 #
 # Usage:
 #   3dpdf-view [file.pdf]
