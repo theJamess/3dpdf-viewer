@@ -62,14 +62,14 @@
         {
           "id": "i-assembly-position-bug",
           "title": "Investigate user-reported misplaced components in multi-part assembly PDFs",
-          "status": "blocked",
+          "status": "done",
           "claimed_by": "f718022f",
           "source": "user",
-          "notes": "Reproduced with user's enclosure.pdf. Root-caused to nanoPRC's PRC 'prototype' occurrence transform composition: for at least one part, the final placement equals exactly 2x a single transform application (occurrence's own transform and its resolved prototype's own transform were byte-identical, both composed). Unclear if this is a nanoPRC composition bug or an authoring bug in whatever generated enclosure.pdf -- no Adobe Acrobat ground truth or PRC-spec expertise available to disambiguate. Documented in README.md 'Known issue' section. Blocked pending user input on how the PDF was generated, or a decision to attempt a speculative fix without a regression corpus (only 3 simple non-assembly example PDFs available to test against).",
-          "updated": "2026-09-18T02:12:09Z"
+          "notes": "Fixed via patches/0002-fix-duplicate-transform.patch: prc_api_helper_add_product's prototype-chain composition skips a hop's transform when it's byte-identical to the one just applied one hop back. Verified against user's enclosure.pdf by isolating each top-level part (AN-04F-02-1=enclosure housing, Assembly 1 _1_-1=main PCB, CSB 01-1=smaller PCB, IPB 01-01-1.step-1=interposer connector) and rendering each against the housing: main PCB near top parallel to floor, smaller PCB against the bottom, interposer near the main board's header -- matches user's description of correct layout. One small residual offset remains in a sub-feature of IPB (~126 units, was ~271 before fix) -- not visually obvious, documented as known residual in README.md.",
+          "updated": "2026-09-18T14:57:40Z"
         }
       ]
     }
   ],
-  "updated": "2026-09-18T02:12:09Z"
+  "updated": "2026-09-18T14:57:40Z"
 }

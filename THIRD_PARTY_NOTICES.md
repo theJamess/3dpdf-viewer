@@ -10,16 +10,20 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
   `third_party/nanoPRC/LICENSE` for its own license file, and
   `third_party/nanoPRC/THIRD_PARTY_NOTICES.md` for the licenses of
   *its* bundled dependencies (SDL3, Dear ImGui, MatrixUtil, zlib).
-- **Modification**: `patches/0001-middle-mouse-pan.patch` adds middle-mouse-
-  drag panning to `demos/viewer/src/main.cpp` (see README.md's "Controls"
-  section for what it does). `scripts/setup.sh` applies it on top of the
-  pinned commit above after fetching the submodule — the submodule itself
-  still points at unmodified upstream, so the patch is the complete,
-  human-readable record of the only change made to nanoPRC's source, per
-  AGPLv3's requirement to state changes made to covered code. Everything
-  else (parsing, rendering, the rest of the viewer) is unmodified upstream
-  nanoPRC.
+- **Modifications** (both applied by `scripts/setup.sh` on top of the pinned
+  commit above after fetching the submodule; the submodule itself still
+  points at unmodified upstream, so these patches are the complete,
+  human-readable record of every change made to nanoPRC's source, per
+  AGPLv3's requirement to state changes made to covered code):
+  - `patches/0001-middle-mouse-pan.patch` adds middle-mouse-drag panning to
+    `demos/viewer/src/main.cpp` (see README.md's "Controls" section).
+  - `patches/0002-fix-duplicate-transform.patch` fixes a placement bug in
+    `src/prc_api.c`'s PRC "prototype" transform composition that could
+    render some parts of a multi-part assembly detached from the rest (see
+    README.md's "Fixed" section).
+  Everything else (parsing, rendering, the rest of the viewer) is unmodified
+  upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,
-  `scripts/setup.sh`, the `.desktop` entry, and the patch above) is
+  `scripts/setup.sh`, the `.desktop` entry, and the patches above) is
   distributed under the same license (AGPLv3, see [LICENSE](LICENSE)) for
   simplicity.

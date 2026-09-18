@@ -1,0 +1,73 @@
+From 4a111a2f66b16f1650a479156fcf72417a3df98b Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Fri, 18 Sep 2026 14:52:55 +0000
+Subject: [PATCH] Skip re-applying an identical transform one hop back in a
+ prototype chain
+
+prc_api_helper_add_product follows PRC "prototype" (shared part
+definition) references by walking occurrence -> prototype -> ... in
+place, composing each hop's own has_transform matrix via
+prc_api_update_transform. Reproduced against a real multi-part
+assembly PDF: for several components, the occurrence's own transform
+and its resolved prototype's own transform decoded to byte-identical
+matrices, and composing both doubled the effective placement (verified
+numerically -- the composed translation was exactly 2x a single
+application's value on two independent axes).
+
+Track the last-applied transform per chain and skip composing a hop's
+transform when it exactly matches the one just applied one hop back.
+This only changes behavior for literal duplicates, so a legitimate
+multi-level chain where each hop's transform genuinely differs still
+composes every hop as before.
+
+Verified against a real 4-part assembly PDF (enclosure + 2 PCBs + an
+interposer connector): before this change, several components rendered
+detached from the assembly; after, isolating each top-level part and
+checking it against the enclosure individually shows the larger PCB
+seated near the top (parallel to the floor), the smaller PCB seated
+against the bottom, and the interposer connector near the larger
+board's header -- matching the assembly's known correct layout. One
+smaller residual offset remains in a sub-feature of the interposer
+part (unclear cause, much smaller magnitude, not visually obvious).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ src/prc_api.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/src/prc_api.c b/src/prc_api.c
+index 2b2ab23..99a6a3b 100644
+--- a/src/prc_api.c
++++ b/src/prc_api.c
+@@ -3286,6 +3286,8 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
+         uint32_t work_parent_biased_style_file_index = item.parent_biased_style_file_index;
+         prc_api_product *work_product_tree = item.product_tree;
+         prc_api_object_style *work_parent_style = item.parent_style;
++        prc_api_transform chain_last_applied;
++        uint8_t chain_has_last_applied = 0;
+ 
+         for (;;)
+         {
+@@ -3369,7 +3371,18 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
+                     result = code;
+                     goto cleanup;
+                 }
+-                prc_api_update_transform(ctx, &work_incoming_transform, &new_transform);
++                /* Skip composing this transform if it is byte-identical to
++                   the one just applied one hop back in this same prototype
++                   chain -- avoids double-applying what appears to be a single
++                   placement redundantly stored at both the occurrence and its
++                   prototype for some files. */
++                if (!(chain_has_last_applied &&
++                      memcmp(&new_transform, &chain_last_applied, sizeof(prc_api_transform)) == 0))
++                {
++                    prc_api_update_transform(ctx, &work_incoming_transform, &new_transform);
++                }
++                chain_last_applied = new_transform;
++                chain_has_last_applied = 1;
+             }
+ 
+             /* !(wants_cross_file_ref && biased_file_index == 0): don't follow
+-- 
+2.47.3
+

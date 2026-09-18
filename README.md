@@ -76,37 +76,43 @@ Three sample 3D PDFs to try are included at
 
 ## Patches
 
-`scripts/setup.sh` applies `patches/0001-middle-mouse-pan.patch` (middle-mouse
-pan, see above) on top of the pinned upstream nanoPRC commit after fetching
-the submodule — it's not part of nanoPRC upstream. See
+`scripts/setup.sh` applies these on top of the pinned upstream nanoPRC commit
+after fetching the submodule — they're not part of nanoPRC upstream. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for what this means for
 licensing.
 
-## Known issue: some assemblies render with parts in the wrong place
+- `patches/0001-middle-mouse-pan.patch` — middle-mouse pan, see "Controls"
+  above.
+- `patches/0002-fix-duplicate-transform.patch` — fixes multi-part assemblies
+  rendering with some parts detached from the rest (see below).
+
+## Fixed: some assemblies used to render with parts in the wrong place
 
 If a PDF's 3D model is a multi-part assembly (as opposed to a single part or a
-handful of siblings), some parts can render offset from where they belong —
+handful of siblings), some parts could render offset from where they belong —
 correctly shaped individually, but floating away from the rest of the
-assembly. This is **not** something wrong with this repo's build; it's
-reproducible against unmodified upstream nanoPRC and traces to how it resolves
-per-occurrence placement transforms for PRC's "prototype" (shared part
-definition) mechanism.
+assembly. This was reproducible against unmodified upstream nanoPRC and traced
+to how it resolves per-occurrence placement transforms for PRC's "prototype"
+(shared part definition) mechanism: when following occurrence -> prototype
+references, at least one affected part's final placement was composed from
+two chained transforms that happened to be byte-identical, so the part ended
+up translated by exactly 2x what a single application would give (verified
+numerically on two independent axes).
 
-What's confirmed by direct instrumentation of the parser against a real
-multi-part assembly PDF: for at least one consistently-offset part, its final
-placement is composed from two chained transforms — the product occurrence's
-own transform and its resolved prototype's own transform — and in that case
-both steps happened to carry the *identical* translation, so the part ends up
-translated by exactly 2x what a single application would give (verified: the
-composed offset was precisely double each step's individually-parsed value).
-Whether that's a nanoPRC composition bug (the prototype step shouldn't
-contribute its own placement again in this case) or the source file redundantly
-encoding the same placement at both levels (an authoring-tool bug in whatever
-generated the PDF) isn't yet determined — untangling it further needs either
-PRC-spec expertise on what "prototype" placement is supposed to mean in this
-case, or a way to check against known-good ground truth (e.g. Adobe Acrobat)
-on the same file, neither of which was available while investigating this.
-Simple/non-assembled models (like the bundled examples) are unaffected.
+`patches/0002-fix-duplicate-transform.patch` fixes this by skipping a hop's
+transform when it exactly matches the one just applied one hop back in the
+same chain — a legitimate multi-level chain where each hop's transform
+genuinely differs is unaffected. Verified against a real 4-part assembly PDF
+(enclosure + 2 PCBs + an interposer connector): isolating each top-level part
+against the enclosure individually now shows the larger PCB seated near the
+top parallel to the floor, the smaller PCB seated against the bottom, and the
+interposer connector near the larger board's header — matching the assembly's
+known-correct layout. One smaller residual offset remains in a sub-feature of
+the interposer part (unclear cause, much smaller magnitude, not visually
+obvious in practice) — if you hit a case where a part still looks
+detached after this fix, that's likely the same class of bug in a different
+shape; file it with as much detail as you can (which part, roughly where it
+should be vs. where it renders).
 
 ## Screenshots
 
