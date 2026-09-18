@@ -1,2 +1,4 @@
 third_party/nanoPRC/build/
+third_party/nanoPRC/build-debug/
 viewer.ini
+uploads/

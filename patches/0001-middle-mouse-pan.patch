@@ -1,0 +1,146 @@
+From 2e9a36570171948aa91393033318041d457e42d7 Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Fri, 18 Sep 2026 02:09:35 +0000
+Subject: [PATCH] Add middle-mouse-button pan to the viewer
+
+Left-drag rotates (arcball) and the wheel zooms by scaling the product
+matrix; middle-drag now pans by translating it in the camera's own
+right/up plane, converted to world space via the same cam2World
+(rotation-only) matrix the arcball uses. The pan delta is measured from
+the button-down anchor to the live cursor position each frame (not
+accumulated), matching how the arcball recomputes its full rotation
+from press-start every frame, and scaled by the orbit-center distance
+and vertical FOV so the model tracks the cursor consistently regardless
+of zoom level.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ demos/viewer/src/main.cpp | 70 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 70 insertions(+)
+
+diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
+index d2e5702..bd80bd6 100644
+--- a/demos/viewer/src/main.cpp
++++ b/demos/viewer/src/main.cpp
+@@ -21,6 +21,7 @@
+ #include <cstring>
+ #include <limits>
+ #include <cmath>
++#include <algorithm>
+ 
+ #include <SDL3/SDL.h>
+ 
+@@ -789,6 +790,22 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+     _scene.load(file, &_camera, memoryLeakCheck);
+     _scene.setCameraInitialPosition(&_camera);
+ 
++    if (getenv("NANOPRC_DBG_WORLD_POS"))
++    {
++        _scene.models()[0].update();
++        Product *all = _scene.models();
++        uint32_t nall = _scene.mumProducts();
++        for (uint32_t i = 0; i < nall; i++)
++        {
++            if (all[i].numMeshes() > 0)
++            {
++                Vector4 origin = all[i].localToWorld() * Vector4(0.0f, 0.0f, 0.0f, 1.0f);
++                fprintf(stderr, "[DBG worldpos] name=%s world=[%g,%g,%g]\n",
++                    all[i].name() ? all[i].name() : "(null)", origin.x, origin.y, origin.z);
++            }
++        }
++    }
++
+     {
+         float recommendedAmbient = 0.6f;
+         float recommendedDiffuse = 1.0f;
+@@ -937,6 +954,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+     int pickX = 0;
+     int pickY = 0;
+     int mouseX_buttondown, mouseY_buttondown;
++    bool middleMouseDown = false;
++    int panAnchorX = 0, panAnchorY = 0;
++    int panLiveX = 0, panLiveY = 0;
++    Matrix4 panCurrMat;
+     Matrix4 curr_mat;
+     Matrix4 transToCenter = Matrix4(1.0f);
+     Matrix4 transFromCenter = Matrix4(1.0f);
+@@ -1056,6 +1077,11 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                     mouseX_buttondown = evt.motion.x;
+                     mouseY_buttondown = evt.motion.y;
+                 }
++                if (middleMouseDown)
++                {
++                    panLiveX = (int)evt.motion.x;
++                    panLiveY = (int)evt.motion.y;
++                }
+                 break;
+             case SDL_EVENT_MOUSE_WHEEL:
+                 curr_mat = _scene.models()[0].model();
+@@ -1067,6 +1093,13 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                     curr_mat = _scene.models()[0].model();
+                     mouseDown = true;
+                 }
++                else if (evt.button.button == SDL_BUTTON_MIDDLE)
++                {
++                    panCurrMat = _scene.models()[0].model();
++                    middleMouseDown = true;
++                    panAnchorX = panLiveX = (int)evt.button.x;
++                    panAnchorY = panLiveY = (int)evt.button.y;
++                }
+                 break;
+             case SDL_EVENT_MOUSE_BUTTON_UP:
+                 if (evt.button.button == SDL_BUTTON_LEFT)
+@@ -1091,6 +1124,10 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                     }
+                     mouseDown = false;
+                 }
++                else if (evt.button.button == SDL_BUTTON_MIDDLE)
++                {
++                    middleMouseDown = false;
++                }
+                 break;
+             }
+         }
+@@ -1118,6 +1155,39 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+         float pitch = _camera.pitch();
+         float yaw = _camera.yaw();
+ 
++        /* Middle-mouse-drag pan: translate the product in the camera's own
++           right/up plane, converted to world space via the same cam2World
++           (rotation-only) matrix the arcball below uses. The delta is always
++           measured from the button-down anchor to the live position (not
++           accumulated frame-to-frame), matching how the arcball recomputes
++           its full rotation from press-start each frame. */
++        if (middleMouseDown && mouseMoved && !mouse_over_debug)
++        {
++            int windowWidth, windowHeight;
++            SDL_GetWindowSizeInPixels(window, &windowWidth, &windowHeight);
++
++            float dx = (float)(panLiveX - panAnchorX);
++            float dy = (float)(panLiveY - panAnchorY);
++
++            /* World units per pixel at the orbit-center distance, so the
++               model tracks the cursor consistently regardless of zoom. */
++            float halfFovY = mutil::radians(_camera.fov()) * 0.5f;
++            float distance = (float)(std::fabs(camZCenter) > 1e-6 ? std::fabs(camZCenter) : 10.0);
++            float worldPerPixel = (2.0f * distance * std::tan(halfFovY)) / (float)std::max(1, windowHeight);
++
++            /* +X is screen-right; screen Y grows downward while camera "up"
++               points the other way, hence the negation on dy. */
++            Vector4 camSpaceDelta4 = Vector4(dx * worldPerPixel, -dy * worldPerPixel, 0.0f, 0.0f);
++            Vector4 worldDelta4 = cam2World * camSpaceDelta4;
++
++            Matrix4 panTrans = Matrix4(1.0f);
++            panTrans = mutil::translate(panTrans,
++                Vector3(worldDelta4.x, worldDelta4.y, worldDelta4.z));
++
++            _scene.models()[0].setModel(panTrans * panCurrMat);
++            mouseMoved = false;
++        }
++
+         /* This is an arcball or trackball implementation for rotating the 3D part
+            with the mouse. Math from Ken Shoemake 1992 */
+         if ((mouseDown && mouseMoved && !mouse_over_debug) || mouse_wheel_delta != 0)
+-- 
+2.47.3
+

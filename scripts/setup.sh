@@ -33,6 +33,19 @@ echo "==> Fetching nanoPRC submodules"
 cd "$REPO_ROOT"
 git submodule update --init --recursive
 
+echo "==> Applying vendored patches to nanoPRC"
+for patch in "$REPO_ROOT"/patches/*.patch; do
+    [ -e "$patch" ] || continue
+    if git -C "$NANOPRC_DIR" apply --check "$patch" 2>/dev/null; then
+        git -C "$NANOPRC_DIR" am --keep-non-patch "$patch"
+        echo "    applied $(basename "$patch")"
+    elif git -C "$NANOPRC_DIR" apply --reverse --check "$patch" 2>/dev/null; then
+        echo "    $(basename "$patch") already applied, skipping"
+    else
+        echo "    WARNING: $(basename "$patch") does not apply cleanly against the pinned nanoPRC commit -- skipping. The build will proceed without it; see README.md's 'Patches' section." >&2
+    fi
+done
+
 echo "==> Configuring (cmake)"
 mkdir -p "$BUILD_DIR"
 cmake -S "$NANOPRC_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release

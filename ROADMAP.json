@@ -49,9 +49,27 @@
           "claimed_by": "f718022f",
           "source": "self",
           "updated": "2026-09-17T04:18:45Z"
+        },
+        {
+          "id": "i-middle-mouse-pan",
+          "title": "Add middle-mouse-drag pan to the viewer",
+          "status": "done",
+          "claimed_by": "f718022f",
+          "source": "user",
+          "notes": "Patched nanoPRC's main.cpp (patches/0001-middle-mouse-pan.patch, applied by setup.sh on top of pinned upstream commit -- submodule itself stays unmodified upstream to keep .gitmodules free of internal URLs). Verified via simulated mouse drag under Xvfb (screenshots/04-panned-cylinder.png).",
+          "updated": "2026-09-18T02:12:09Z"
+        },
+        {
+          "id": "i-assembly-position-bug",
+          "title": "Investigate user-reported misplaced components in multi-part assembly PDFs",
+          "status": "blocked",
+          "claimed_by": "f718022f",
+          "source": "user",
+          "notes": "Reproduced with user's enclosure.pdf. Root-caused to nanoPRC's PRC 'prototype' occurrence transform composition: for at least one part, the final placement equals exactly 2x a single transform application (occurrence's own transform and its resolved prototype's own transform were byte-identical, both composed). Unclear if this is a nanoPRC composition bug or an authoring bug in whatever generated enclosure.pdf -- no Adobe Acrobat ground truth or PRC-spec expertise available to disambiguate. Documented in README.md 'Known issue' section. Blocked pending user input on how the PDF was generated, or a decision to attempt a speculative fix without a regression corpus (only 3 simple non-assembly example PDFs available to test against).",
+          "updated": "2026-09-18T02:12:09Z"
         }
       ]
     }
   ],
-  "updated": "2026-09-17T04:18:45Z"
+  "updated": "2026-09-18T02:12:09Z"
 }
