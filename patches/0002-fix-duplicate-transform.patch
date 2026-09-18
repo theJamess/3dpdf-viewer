@@ -1,4 +1,4 @@
-From 4a111a2f66b16f1650a479156fcf72417a3df98b Mon Sep 17 00:00:00 2001
+From a876d579236203a376a02791c8e1cff8cd0db96e Mon Sep 17 00:00:00 2001
 From: 3dpdf <3dpdf@users.noreply.github.com>
 Date: Fri, 18 Sep 2026 14:52:55 +0000
 Subject: [PATCH] Skip re-applying an identical transform one hop back in a
@@ -7,39 +7,121 @@ Subject: [PATCH] Skip re-applying an identical transform one hop back in a
 prc_api_helper_add_product follows PRC "prototype" (shared part
 definition) references by walking occurrence -> prototype -> ... in
 place, composing each hop's own has_transform matrix via
-prc_api_update_transform. Reproduced against a real multi-part
-assembly PDF: for several components, the occurrence's own transform
-and its resolved prototype's own transform decoded to byte-identical
-matrices, and composing both doubled the effective placement (verified
-numerically -- the composed translation was exactly 2x a single
-application's value on two independent axes).
+prc_api_update_transform. Reproduced against real multi-part assembly
+PDFs (from two entirely different authoring tools: a hobbyist/AI-CAD
+enclosure export and a Tetra4D official sample "Gear Box"): for
+several components, the occurrence's own transform and its resolved
+prototype's own transform decoded to the same matrix, and composing
+both doubled the effective placement.
 
 Track the last-applied transform per chain and skip composing a hop's
-transform when it exactly matches the one just applied one hop back.
-This only changes behavior for literal duplicates, so a legitimate
-multi-level chain where each hop's transform genuinely differs still
-composes every hop as before.
+transform when it matches the one just applied one hop back. This only
+changes behavior for duplicates, so a legitimate multi-level chain
+where each hop's transform genuinely differs still composes every hop
+as before.
 
-Verified against a real 4-part assembly PDF (enclosure + 2 PCBs + an
-interposer connector): before this change, several components rendered
-detached from the assembly; after, isolating each top-level part and
-checking it against the enclosure individually shows the larger PCB
-seated near the top (parallel to the floor), the smaller PCB seated
-against the bottom, and the interposer connector near the larger
-board's header -- matching the assembly's known correct layout. One
-smaller residual offset remains in a sub-feature of the interposer
-part (unclear cause, much smaller magnitude, not visually obvious).
+The comparison is NOT exact equality, on two counts learned the hard
+way while verifying this against real files:
+
+1. memcmp on the whole prc_api_transform struct is wrong: the struct
+   is { double matrix[16]; uint8_t is_identity }, which a compiler
+   pads to a multiple of 8 bytes for the double array's alignment, and
+   that padding is uninitialized stack garbage on a plain local
+   declaration -- memcmp compares the garbage too, so it only detects
+   equal transforms by chance.
+
+2. Exact `==` on the doubles, field by field, is *also* unreliable:
+   two occurrences that redundantly encode the literal same placement
+   can each independently decode a handful of matrix entries that are
+   conceptually zero to two representations about 1 ULP apart (e.g.
+   3.28e-31 vs 3.28e-31 with a different last bit), while every
+   non-negligible entry -- the real rotation and translation -- comes
+   back bit-for-bit identical. This was caught by testing against a
+   second, independently-authored sample file (Tetra4D's own "Gear
+   Box"): a component named "Lagerstuetz" (bearing support) had this
+   exact 1-ULP-apart-only-in-noise-terms pattern, which the original
+   exact-equality version of this fix silently failed to dedupe,
+   leaving it detached in the render at 2x its correct offset -- the
+   same symptom this patch exists to fix, just not caught by the first
+   version of the fix itself.
+
+`prc_api_transform_equal` compares is_identity plus all 16 matrix
+entries with a 1e-9 absolute tolerance -- far tighter than any
+geometrically meaningful difference in these mm-to-m-scale files, so
+it can't false-positive against a genuinely different transform, while
+absorbing exactly this class of decode noise.
+
+Verified against 7 files total: the 3 bundled trivial examples (no
+regression), the original enclosure+2-PCBs+interposer file this fix
+was first written for (still correct), and 3 official Tetra4D sample
+assemblies fetched fresh for this (carburetor, gear box, disc brake) --
+carburetor and disc brake were already correctly assembled and remain
+so; gear box's detached "Lagerstuetz" is now correctly seated with the
+rest of the assembly.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 ---
- src/prc_api.c | 15 ++++++++++++++-
- 1 file changed, 14 insertions(+), 1 deletion(-)
+ src/prc_api.c | 54 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 53 insertions(+), 1 deletion(-)
 
 diff --git a/src/prc_api.c b/src/prc_api.c
-index 2b2ab23..99a6a3b 100644
+index 2b2ab23..0860f0a 100644
 --- a/src/prc_api.c
 +++ b/src/prc_api.c
-@@ -3286,6 +3286,8 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
+@@ -20,6 +20,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdint.h> /* for UINT32_MAX */
++#include <math.h> /* for fabs, used by prc_api_transform_equal */
+ 
+ /* Reasonable guard to avoid unbounded allocations. Tune as needed. */
+ #define PRC_STYLE_POOL_MAX_CAPACITY (1000000u)
+@@ -3242,6 +3243,44 @@ prc_api_add_product_push(prc_context *ctx, prc_api_add_product_work **worklist,
+    instead of recursing; (2) genuine branching over child product
+    occurrences, each getting its own product_tree node -- converted to
+    pushing onto the outer work list. */
++/* Field-by-field comparison with a tolerance, NOT memcmp and not exact
++   equality either.
++
++   memcmp is out because prc_api_transform is { double matrix[16];
++   uint8_t is_identity; }, which a compiler pads out to a multiple of 8
++   bytes for the double array's alignment; those padding bytes are
++   uninitialized stack garbage on a plain local declaration (as both
++   sides of this comparison are), so memcmp-ing the whole struct compares
++   that garbage too and only detects equal transforms by chance.
++
++   Exact `==` on the doubles is *also* unreliable, empirically: two
++   occurrences that redundantly encode the literal same placement (the
++   case this function exists to catch) can each independently decode a
++   handful of matrix entries that are conceptually zero to two different
++   representations roughly 1 ULP apart (e.g. 3.28e-31 vs 3.28e-31 with a
++   different last bit) while every entry that isn't negligible -- the
++   real rotation and translation components -- comes back bit-for-bit
++   identical. A tolerance well below any geometrically meaningful
++   difference (files here are authored in mm-to-m-scale units, so 1e-9
++   is still many orders of magnitude tighter than a real distinct
++   placement would differ by) absorbs that noise without risking a false
++   match against a genuinely different transform. */
++static int
++prc_api_transform_equal(const prc_api_transform *a, const prc_api_transform *b)
++{
++    static const double kTolerance = 1e-9;
++    int i;
++
++    if (a->is_identity != b->is_identity)
++        return 0;
++    for (i = 0; i < 16; i++)
++    {
++        if (fabs(a->matrix[i] - b->matrix[i]) > kTolerance)
++            return 0;
++    }
++    return 1;
++}
++
+ static int
+ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_files,
+     uint32_t curr_file_index, unsigned char *base_product_name,
+@@ -3286,6 +3325,8 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
          uint32_t work_parent_biased_style_file_index = item.parent_biased_style_file_index;
          prc_api_product *work_product_tree = item.product_tree;
          prc_api_object_style *work_parent_style = item.parent_style;
@@ -48,18 +130,18 @@ index 2b2ab23..99a6a3b 100644
  
          for (;;)
          {
-@@ -3369,7 +3371,18 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
+@@ -3369,7 +3410,18 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
                      result = code;
                      goto cleanup;
                  }
 -                prc_api_update_transform(ctx, &work_incoming_transform, &new_transform);
-+                /* Skip composing this transform if it is byte-identical to
++                /* Skip composing this transform if it is (within tolerance)
 +                   the one just applied one hop back in this same prototype
 +                   chain -- avoids double-applying what appears to be a single
 +                   placement redundantly stored at both the occurrence and its
 +                   prototype for some files. */
 +                if (!(chain_has_last_applied &&
-+                      memcmp(&new_transform, &chain_last_applied, sizeof(prc_api_transform)) == 0))
++                      prc_api_transform_equal(&new_transform, &chain_last_applied)))
 +                {
 +                    prc_api_update_transform(ctx, &work_incoming_transform, &new_transform);
 +                }

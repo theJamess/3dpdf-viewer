@@ -133,24 +133,36 @@ assembly. This was reproducible against unmodified upstream nanoPRC and traced
 to how it resolves per-occurrence placement transforms for PRC's "prototype"
 (shared part definition) mechanism: when following occurrence -> prototype
 references, at least one affected part's final placement was composed from
-two chained transforms that happened to be byte-identical, so the part ended
-up translated by exactly 2x what a single application would give (verified
-numerically on two independent axes).
+two chained transforms that were really the same placement stored twice, so
+the part ended up translated by exactly 2x what a single application would
+give.
 
 `patches/0002-fix-duplicate-transform.patch` fixes this by skipping a hop's
-transform when it exactly matches the one just applied one hop back in the
-same chain — a legitimate multi-level chain where each hop's transform
-genuinely differs is unaffected. Verified against a real 4-part assembly PDF
-(enclosure + 2 PCBs + an interposer connector): isolating each top-level part
-against the enclosure individually now shows the larger PCB seated near the
-top parallel to the floor, the smaller PCB seated against the bottom, and the
-interposer connector near the larger board's header — matching the assembly's
-known-correct layout. One smaller residual offset remains in a sub-feature of
-the interposer part (unclear cause, much smaller magnitude, not visually
-obvious in practice) — if you hit a case where a part still looks
-detached after this fix, that's likely the same class of bug in a different
-shape; file it with as much detail as you can (which part, roughly where it
-should be vs. where it renders).
+transform when it matches the one just applied one hop back in the same
+chain — a legitimate multi-level chain where each hop's transform genuinely
+differs is unaffected. Getting the *comparison* right took two attempts: an
+initial version used exact equality (`memcmp`, then field-by-field `==`), which
+worked for the file it was first written against but missed a real duplicate
+in a second, independently-authored test file — two "identical" transforms
+can each decode a few near-zero matrix entries to representations about 1 ULP
+apart while every entry that actually matters is bit-for-bit identical, so
+exact equality doesn't reliably catch this. The shipped version compares with
+a 1e-9 tolerance instead (see the patch's own commit message for the full
+detail — including the memcmp/struct-padding pitfall, which is worth reading
+if you're touching this code).
+
+Verified across 7 files from three different authoring tools: the 3 bundled
+trivial examples (no regression), a hobbyist/AI-CAD enclosure assembly (2
+PCBs + an interposer connector — the file this fix was first written
+for), and 3 official [Tetra4D sample assemblies](https://tetra4d.com/pdf-samples/)
+fetched fresh to cross-check against an independent source (carburetor, gear
+box, disc brake). Carburetor and disc brake were already correctly assembled
+and remain so; the gear box's "Lagerstuetz" (bearing support) component,
+previously detached and floating well outside the housing, is now correctly
+seated with the rest of the assembly. If you hit a case where a part still
+looks detached after this fix, please say which part and roughly where it
+should be vs. where it renders — that's exactly the kind of report that led
+to catching the gap in the first version of this fix.
 
 ## Screenshots
 

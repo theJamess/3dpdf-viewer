@@ -10,7 +10,7 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
   `third_party/nanoPRC/LICENSE` for its own license file, and
   `third_party/nanoPRC/THIRD_PARTY_NOTICES.md` for the licenses of
   *its* bundled dependencies (SDL3, Dear ImGui, MatrixUtil, zlib).
-- **Modifications** (both applied by `scripts/setup.sh` on top of the pinned
+- **Modifications** (all applied by `scripts/setup.sh` on top of the pinned
   commit above after fetching the submodule; the submodule itself still
   points at unmodified upstream, so these patches are the complete,
   human-readable record of every change made to nanoPRC's source, per
