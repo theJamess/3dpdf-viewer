@@ -27,6 +27,10 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
     (README.md's "Controls" section), touching
     `demos/viewer/src/main.cpp`, `scene.{h,cpp}`, `mesh.{h,cpp}`, and
     `demos/viewer/shaders/generic.frag`.
+  - `patches/0004-prefer-system-sdl3.patch` makes the build try an
+    already-installed SDL3 before compiling the vendored copy from source
+    (README.md's "Setup" section), touching `CMakeLists.txt` and
+    `thirdparty/CMakeLists.txt`.
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,

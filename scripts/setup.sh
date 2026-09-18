@@ -8,16 +8,24 @@ NANOPRC_DIR="$REPO_ROOT/third_party/nanoPRC"
 BUILD_DIR="$NANOPRC_DIR/build"
 
 echo "==> Installing build dependencies (apt, needs sudo)"
-# NOTE: we do NOT depend on the "libsdl3-dev" apt package -- it's very new
-# and isn't in the repos of most current Ubuntu releases (22.04/24.04 LTS
-# included). nanoPRC's CMake build compiles SDL3 itself from the vendored
-# thirdparty/SDL submodule, so what we actually need are SDL3's own Linux
-# *build* dependencies (per https://wiki.libsdl.org/SDL3/README-linux),
-# not a prebuilt SDL3 package.
 sudo apt-get update -qq
+sudo apt-get install -y -qq cmake build-essential git pkg-config \
+    libpng-dev libjpeg-dev zlib1g-dev zenity
+
+# Try the real "libsdl3-dev" package first (best-effort: it's very new and
+# isn't in the repos of most current Ubuntu releases, 22.04/24.04 LTS
+# included). When it's there, nanoPRC's CMake build (patched by
+# patches/0004-prefer-system-sdl3.patch) links against it directly and skips
+# compiling SDL3 from source entirely -- seconds instead of minutes, and
+# none of the packages below are actually needed. Always install the rest
+# too, so the from-source fallback keeps working on releases without it.
+sudo apt-get install -y -qq libsdl3-dev \
+    || echo "    (libsdl3-dev not available on this release -- will build SDL3 from source instead, see below)"
+
+# SDL3's own Linux *build* dependencies (per
+# https://wiki.libsdl.org/SDL3/README-linux), needed to compile the
+# vendored thirdparty/SDL copy when libsdl3-dev above isn't available.
 sudo apt-get install -y -qq \
-    cmake build-essential git pkg-config \
-    libpng-dev libjpeg-dev zlib1g-dev zenity \
     libasound2-dev libpulse-dev libjack-dev libsndio-dev \
     libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
     libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
@@ -50,7 +58,7 @@ echo "==> Configuring (cmake)"
 mkdir -p "$BUILD_DIR"
 cmake -S "$NANOPRC_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
 
-echo "==> Building nano_prc_viewer (this compiles bundled SDL3, may take a few minutes)"
+echo "==> Building nano_prc_viewer (skips SDL3 if libsdl3-dev was found above; ~15s vs ~2min from source)"
 cmake --build "$BUILD_DIR" --target nano_prc_viewer -- -j"$(nproc)"
 
 echo "==> Installing desktop entry (~/.local/share/applications)"
@@ -60,6 +68,19 @@ sed "s#REPO_ROOT#$REPO_ROOT#" "$REPO_ROOT/desktop/3dpdf-viewer.desktop" \
 command -v update-desktop-database >/dev/null 2>&1 && \
     update-desktop-database "$HOME/.local/share/applications" || true
 
+echo "==> Linking 'bin/3dpdf-view' into ~/.local/bin so it works from anywhere"
+mkdir -p "$HOME/.local/bin"
+ln -sf "$REPO_ROOT/bin/3dpdf-view" "$HOME/.local/bin/3dpdf-view"
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*)
+        PATH_NOTE="you can now just run '3dpdf-view <file.pdf>' from anywhere."
+        ;;
+    *)
+        PATH_NOTE="add \$HOME/.local/bin to your PATH to run '3dpdf-view <file.pdf>' from anywhere (it's not on PATH right now)."
+        ;;
+esac
+
 echo "==> Done. Binary at: $BUILD_DIR/bin/nano_prc_viewer"
-echo "    Run 'bin/3dpdf-view <file.pdf>' from the repo root to open a 3D PDF,"
-echo "    or find '3D PDF Viewer' in your applications menu."
+echo "    $PATH_NOTE"
+echo "    Or run 'bin/3dpdf-view <file.pdf>' from the repo root, or find"
+echo "    '3D PDF Viewer' in your applications menu."

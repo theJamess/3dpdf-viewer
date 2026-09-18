@@ -1,0 +1,62 @@
+name: Build and smoke-test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest exercises the "libsdl3-dev is available" fast path
+        # (patches/0004); ubuntu-22.04 exercises the from-source SDL3
+        # fallback (libsdl3-dev doesn't exist on 22.04's repos), so both
+        # code paths setup.sh supports stay covered.
+        os: [ubuntu-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        # Deliberately not fetching submodules here: scripts/setup.sh does
+        # `git submodule update --init --recursive` itself, and that's the
+        # actual documented user flow (README.md's "Setup" section) this
+        # job exists to keep honest.
+
+      - name: Run scripts/setup.sh
+        run: ./scripts/setup.sh
+
+      - name: Install Xvfb (for the headless smoke test only)
+        run: sudo apt-get install -y -qq xvfb
+
+      - name: Smoke test -- render each bundled example to a PNG
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ci-renders
+          for f in cube cylinder triangle; do
+            xvfb-run -a --server-args="-screen 0 800x600x24" \
+              ./bin/3dpdf-view "third_party/nanoPRC/examples/$f.pdf" \
+              --batch --output "/tmp/ci-renders/$f.png"
+            test -s "/tmp/ci-renders/$f.png"
+          done
+
+      - name: Smoke test -- 3dpdf-view works from outside the repo (PATH symlink)
+        run: |
+          set -euo pipefail
+          cd /tmp
+          xvfb-run -a --server-args="-screen 0 800x600x24" \
+            "$HOME/.local/bin/3dpdf-view" \
+            "$GITHUB_WORKSPACE/third_party/nanoPRC/examples/cube.pdf" \
+            --batch --output /tmp/ci-renders/from-path.png
+          test -s /tmp/ci-renders/from-path.png
+
+      - name: Upload rendered PNGs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renders-${{ matrix.os }}
+          path: /tmp/ci-renders/
+          if-no-files-found: ignore

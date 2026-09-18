@@ -13,7 +13,17 @@
 # If no file is given, a file-picker dialog is shown (requires zenity).
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve our OWN real path first: setup.sh symlinks this script into
+# ~/.local/bin so it works from anywhere, and dirname on a symlink's own
+# path (not its target) would otherwise compute the wrong REPO_ROOT.
+SELF="${BASH_SOURCE[0]}"
+if command -v realpath >/dev/null 2>&1; then
+    SELF="$(realpath "$SELF")"
+else
+    SELF="$(readlink -f "$SELF")"
+fi
+
+REPO_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 VIEWER_BIN="$REPO_ROOT/third_party/nanoPRC/build/bin/nano_prc_viewer"
 
 if [[ ! -x "$VIEWER_BIN" ]]; then

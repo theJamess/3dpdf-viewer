@@ -1,0 +1,89 @@
+From 1f33f708ec3acffea54413569ab02647e6b0b5df Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Fri, 18 Sep 2026 19:20:00 +0000
+Subject: [PATCH] Prefer system-installed SDL3 over building it from source
+
+The demo viewer's CMakeLists.txt unconditionally required
+NANOPRC_BUILD_SDL=ON (add_subdirectory(SDL), compiling the vendored
+copy) with no fallback to an already-installed SDL3, even though
+recent distros package one. Building SDL3 from source is most of this
+project's build time (~2 minutes vs ~15 seconds) and needs ~25 extra
+apt -dev packages (X11, audio, etc.) purely to satisfy SDL3's own
+build dependencies.
+
+Try find_package(SDL3 CONFIG) first (new NANOPRC_USE_SYSTEM_SDL
+option, default ON); only add_subdirectory(SDL) if that fails. The
+find_package call has to live in the top-level CMakeLists.txt, not
+thirdparty/CMakeLists.txt where NANOPRC_BUILD_SDL is otherwise handled
+-- find_package's imported targets are only visible in the calling
+scope and its children, and demos/viewer is thirdparty's *sibling*
+subdirectory, added separately from the top level. A regular
+add_subdirectory(SDL) target doesn't have this problem (ordinary
+targets are visible project-wide), which is why the existing fallback
+path never hit it.
+
+Verified against the actual system SDL3 package available on this
+machine (3.2.10, vs vendored 3.5.0-dev): configures, compiles, links,
+and runs correctly, including this fork's own pan/reset/section
+features -- the fact that it *compiled* against the system headers is
+itself good evidence there's no API this project needs that's missing
+from 3.2.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ CMakeLists.txt            | 17 +++++++++++++++++
+ thirdparty/CMakeLists.txt |  5 ++++-
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5e70c36..caea610 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -36,12 +36,29 @@ option(NANOPRC_ENABLE_BREP "Enable B-Rep write facility (Phase 2)" OFF)
+ option(NANOPRC_BUILD_DEMOS "Build nanoPRC demo executables" ON)
+ option(NANOPRC_BUILD_TESTS "Build nanoPRC tests" ON)
+ option(NANOPRC_BUILD_SDL "Build SDL dependency (needed for viewer demos)" ON)
++option(NANOPRC_USE_SYSTEM_SDL "Prefer an already-installed SDL3 over building the vendored copy from source" ON)
+ option(NANOPRC_ENABLE_WINDOWS_GAMEINPUT "Enable SDL GameInput integration on Windows (requires gameinput.h)" OFF)
+ 
+ if (NANOPRC_BUILD_DEMOS AND NOT NANOPRC_BUILD_SDL)
+ 	message(FATAL_ERROR "NANOPRC_BUILD_DEMOS=ON requires NANOPRC_BUILD_SDL=ON")
+ endif()
+ 
++# Must run at this (top-level) scope, not inside thirdparty/'s subdirectory:
++# find_package's imported targets are only visible in the directory scope
++# that called it and that scope's children, and demos/viewer (added below,
++# as a sibling of thirdparty/) needs to see SDL3::SDL3 too. A regular
++# add_subdirectory(SDL) target doesn't have this problem -- normal targets
++# are visible project-wide -- which is why this couldn't just live inside
++# thirdparty/CMakeLists.txt next to that fallback call.
++set(NANOPRC_SDL3_FOUND_SYSTEM FALSE)
++if (NANOPRC_BUILD_SDL AND NANOPRC_USE_SYSTEM_SDL)
++	find_package(SDL3 QUIET CONFIG)
++	if (SDL3_FOUND)
++		set(NANOPRC_SDL3_FOUND_SYSTEM TRUE)
++		message(STATUS "nanoPRC: using system-installed SDL3 ${SDL3_VERSION} (skips building the vendored copy)")
++	endif()
++endif()
++
+ if (WIN32 AND NOT NANOPRC_ENABLE_WINDOWS_GAMEINPUT)
+ 	# SDL probes for gameinput.h and enables code paths that require it when found.
+ 	# On clean machines this can be inconsistent across configure/build contexts;
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index a07e407..174598a 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -6,6 +6,9 @@ option(NANOPRC_BUILD_SDL "Build SDL dependency" ON)
+ 
+ include(zlib.cmake)
+ 
+-if (NANOPRC_BUILD_SDL)
++# NANOPRC_SDL3_FOUND_SYSTEM is set by the top-level CMakeLists.txt (has to
++# run find_package(SDL3) at that scope so the resulting imported target is
++# visible from demos/viewer too -- see the comment there).
++if (NANOPRC_BUILD_SDL AND NOT NANOPRC_SDL3_FOUND_SYSTEM)
+ 	add_subdirectory(SDL)
+ endif()
+-- 
+2.47.3
+

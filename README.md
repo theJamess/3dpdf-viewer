@@ -44,23 +44,33 @@ cd <this repo>
 ./scripts/setup.sh
 ```
 
-This installs build dependencies via `apt` (cmake, SDL3 dev headers,
-libpng/libjpeg/zlib dev headers, `zenity` for the file picker), builds
-`nano_prc_viewer` from the vendored submodule, and installs a "3D PDF
-Viewer" entry into your applications menu.
+This installs build dependencies via `apt`, builds `nano_prc_viewer` from
+the vendored submodule, installs a "3D PDF Viewer" entry into your
+applications menu, and symlinks `bin/3dpdf-view` into `~/.local/bin` so
+the `3dpdf-view` command works from any directory (add `~/.local/bin` to
+your `PATH` if it isn't already — the script tells you whether it is).
 
 If you already cloned without `--recurse-submodules`, run
 `git submodule update --init --recursive` first, or just run
 `scripts/setup.sh` — it does this for you.
 
+Takes well under a minute on a system that has `libsdl3-dev` available
+(most current Debian/Ubuntu releases as of late 2026); a few minutes on
+older releases that don't, since it falls back to compiling SDL3 from
+source. Either way, this exact flow is checked on every push by
+`.github/workflows/build.yml` against both cases (see "Patches" below).
+
 ## Usage
 
 ```bash
-bin/3dpdf-view path/to/model.pdf
+3dpdf-view path/to/model.pdf
 ```
 
-Or run `bin/3dpdf-view` with no arguments to pick a file graphically, or
-launch "3D PDF Viewer" from your applications menu.
+(after running `scripts/setup.sh` — see "Setup" above). Or run
+`3dpdf-view` with no arguments to pick a file graphically, or launch
+"3D PDF Viewer" from your applications menu. If you haven't run
+`scripts/setup.sh` yet, `bin/3dpdf-view path/to/model.pdf` from the repo
+root works the same way.
 
 **Mouse:**
 - **Left-click drag** — rotate/orbit the model (arcball/trackball rotation)
@@ -109,6 +119,10 @@ licensing.
   the model's own position, only visible once panning existed to move the
   model away from the origin); adds Reset View, Save Screenshot, an
   on-screen control-hint caption, and the Section (clipping plane) tab.
+- `patches/0004-prefer-system-sdl3.patch` — tries an already-installed
+  SDL3 (`find_package`) before compiling the vendored copy from source,
+  cutting a from-scratch `scripts/setup.sh` run from a couple of minutes
+  to well under one on systems that have `libsdl3-dev`. See "Setup" above.
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 
