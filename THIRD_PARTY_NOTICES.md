@@ -40,6 +40,10 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
     internal test tools under `tests/internal/`. Not wired into the
     viewer UI; see README.md's "Patches" section for its significant
     scope limitation (uncompressed B-Rep bodies only).
+  - `patches/0006-measure-distance-and-angle.patch` adds a **Measure** tab
+    and in-viewport overlay to `demos/viewer/src/main.cpp`: point-to-point
+    distance and three-point angle, built on the existing triangle-pick
+    ray-cast (see README.md's "Controls" section).
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,

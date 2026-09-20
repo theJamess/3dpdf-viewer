@@ -78,7 +78,7 @@ root works the same way.
   grabbing it)
 - **Scroll wheel** — zoom in/out, centered on wherever the model currently is
 - **Ctrl + left-click** — pick a triangle (prints its vertices/normals to
-  the terminal)
+  the terminal); also feeds the **Measure** tab (see below)
 
 **Keyboard:**
 - **W/A/S/D**, **Q/E** — fly the camera (forward/left/back/right, down/up);
@@ -100,6 +100,18 @@ memorize keys.
 **Cross-section**: the **Section** tab cuts the model away on one side of a
 plane (pick an axis, slide the offset, optionally flip which side is kept)
 — useful for looking inside an enclosure without hiding parts one at a time.
+
+**Measure**: the **Measure** tab turns picked points (Ctrl+left-click, same
+as Triangle Pick above) into a distance and angle tool — click "Set Point
+A/B/C from last pick" after picking each point; A-B gives a distance, and
+A-B-C gives the angle at B. Picked points, the line(s) between them, and
+the live distance/angle are also drawn directly in the viewport, not just
+the panel. Values are reported in **file units, not millimeters** — PRC
+carries a per-file CAD-unit scale field, but this project could not
+independently confirm which direction it converts (no bundled copy of the
+ISO 14739-1 spec to check against), so rather than risk a confidently-wrong
+millimeter figure, it's left as file units; see the Measure tab's own text
+and this feature's patch for detail.
 
 Three sample 3D PDFs to try are included at
 `third_party/nanoPRC/examples/` (`cube.pdf`, `cylinder.pdf`, `triangle.pdf`).
@@ -147,6 +159,13 @@ licensing.
   `tests/internal/brep_entity_census` first — it reports BrepData vs.
   BrepDataCompress per file so you know ahead of time whether a given file
   is in scope.
+- `patches/0006-measure-distance-and-angle.patch` — adds the **Measure**
+  tab and its in-viewport overlay (see "Controls" above): a mesh-based
+  distance/angle tool built on the existing triangle-pick infrastructure.
+  Approximate in the sense that it measures the *tessellated* mesh (the
+  same triangles you see rendered), not the exact underlying CAD surface —
+  for the handful of files in scope for patches/0005 above, that's a real
+  but normally tiny difference from the true analytic distance.
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 
@@ -188,10 +207,44 @@ looks detached after this fix, please say which part and roughly where it
 should be vs. where it renders — that's exactly the kind of report that led
 to catching the gap in the first version of this fix.
 
+## Known limitation: some files with only compressed exact geometry render blank
+
+While looking for a sample 3D PDF with PMI (dimensions/GD&T annotations) to
+verify this viewer's existing-but-until-now-never-exercised PMI/markup
+rendering code, we found a real commercial file — Tetra4D's own "Landing
+Gear Main Shaft – PMI" sample — that renders as a **completely empty
+scene** in `nano_prc_viewer`: no error, just nothing drawn, with an
+"invalid scene bounding box" warning in the log.
+
+Root cause, confirmed with this project's own diagnostic tools: the file's
+geometry consists of one `PRC_TYPE_TOPO_BrepDataCompress` body (confirmed
+via `tests/internal/brep_entity_census`) and no part in its tree has a
+regular tessellation of its own (`biased_tess_index=0` for every part, via
+`tests/internal/dump_tree_fields`) — this is exactly the "tessellation-free
+file" case nanoPRC's exact-geometry fallback (`prc_api_get_number_exact_geom_
+objects` and friends) exists for. But that fallback also reports zero
+objects for this file (confirmed directly), so the fallback never fires and
+nothing renders. This is a pre-existing nanoPRC limitation, not something
+introduced by this project's patches — it reproduces against unmodified
+upstream. We did not attempt a fix: root-causing *why* this file's
+representation items don't carry the back-reference the fallback needs
+would mean digging into the RI-to-exact-geometry linkage nanoPRC's tree
+parser expects, which is a separate, larger investigation from what this
+was found while doing (verifying PMI rendering — which remains unverified,
+since this was the only readily-available sample with real PMI content and
+it doesn't render at all).
+
+If you hit a 3D PDF that opens to a blank scene, this is a plausible cause
+— check it with `tests/internal/scan_prc yourfile.pdf`: `tess=0` alongside
+a non-empty `geometry` section (visible via `brep_entity_census`) matches
+this pattern.
+
 ## Screenshots
 
 `screenshots/01-cube.png`, `screenshots/02-rotated-cylinder.png` (mid-rotation,
 via mouse drag), `screenshots/03-triangle.png`, `screenshots/04-panned-cylinder.png`
 (mid-pan, via middle-mouse drag), `screenshots/05-cross-section.png` (the
-Section tab's clipping plane cutting into the cube) — all rendered from this
-repo's own build against the bundled example PDFs.
+Section tab's clipping plane cutting into the cube), `screenshots/06-measure-
+distance-angle.png` (the Measure tab with three points picked on the cube,
+showing both the panel readout and the in-viewport distance/angle overlay)
+— all rendered from this repo's own build against the bundled example PDFs.

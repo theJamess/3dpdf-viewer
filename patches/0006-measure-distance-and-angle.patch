@@ -1,0 +1,279 @@
+From 9bd0b74e7d5f709fa5a99e42bdd6a600811e789a Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Sun, 20 Sep 2026 16:50:56 +0000
+Subject: [PATCH] Add a mesh-based distance/angle measurement tool (Measure
+ tab)
+
+Reuses the existing Ctrl+LeftClick triangle-pick's world-space hit
+position rather than adding a second mouse gesture: "Set Point A/B/C
+from last pick" buttons in a new Measure tab copy the current pick
+into one of three measurement point slots. With A and B set, shows
+the distance between them; with A, B, and C set, shows the angle at
+B between B->A and B->C. Picked points, the connecting line(s), and
+the live distance/angle are also drawn straight onto the viewport
+via ImGui's foreground draw list (worldToScreen projects through the
+camera's existing view/projection matrices) -- no new 3D geometry or
+render pass, matching how Triangle Pick's own feedback works.
+
+This measures the TESSELLATED mesh (the same triangles rendered),
+not the exact underlying CAD surface -- an approximation, though
+normally a tight one.
+
+Deliberately reports distance in FILE UNITS, not millimeters. PRC
+carries a per-file CAD-unit scale (units_from_CAD_flag/units_from_
+CAD_file in the ModelFile section), but this project could not
+independently confirm which direction it converts -- there's no
+bundled copy of the ISO 14739-1 spec to check against, and an
+existing comment elsewhere in this codebase (prc_api.c's transform-
+dedup tolerance) already notes real files span "mm-to-m-scale"
+rather than one fixed convention. A confidently-labeled but possibly
+backwards millimeter figure would be worse than plain file units, so
+that's what this reports; the Measure tab's own UI text says why.
+Angle is unaffected -- it's a ratio, so it's always correct
+regardless of unit scale.
+
+Verified interactively end-to-end under Xvfb (xdotool-driven picks +
+UI clicks, screenshots at each step): picked three points on the
+bundled cube.pdf example, set A/B/C, and confirmed the panel text
+("Distance A-B: 48.185390 file units", "Angle at B (A-B-C): 71.8581
+degrees") exactly matches the independently-formatted in-viewport
+overlay labels ("48.1854", "71.86 deg") -- two separately-coded
+display paths computing from the same two stored points and
+agreeing is a real (if informal) correctness check, not just "it
+compiled". Also verified Clear All resets all three points and every
+overlay element.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ demos/viewer/src/main.cpp | 187 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 187 insertions(+)
+
+diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
+index 43a9804..b9457c0 100644
+--- a/demos/viewer/src/main.cpp
++++ b/demos/viewer/src/main.cpp
+@@ -335,6 +335,47 @@ static bool pickTriangleAtScreenPoint(int mouseX, int mouseY, int viewportW,
+     return best.valid;
+ }
+ 
++/* Point-to-point/angle measurement: reuses g_lastPick's world-space hit
++   position (the ray-triangle intersection already computed for Triangle
++   Pick) rather than adding a second mouse gesture -- "Set Point A/B/C"
++   buttons in the Measure tab just copy whatever was last picked.
++
++   Distances/coordinates here are in FILE UNITS, not millimeters. PRC does
++   carry a per-file CAD-unit scale (units_from_CAD_flag/units_from_CAD_file
++   in the ModelFile section), but this codebase could not independently
++   confirm which direction it converts (mm-per-file-unit or the reverse) --
++   there's no bundled copy of the ISO 14739-1 spec to check against, and an
++   existing comment elsewhere in this codebase (prc_api.c, the transform-
++   dedup tolerance) already notes real files span "mm-to-m-scale" rather
++   than a single fixed convention. Reporting a confidently-labeled but
++   possibly-backwards millimeter figure would be worse than reporting file
++   units plainly, so that's what this does; a future patch can add real-
++   unit conversion once verified against a file with independently known
++   physical dimensions. */
++struct MeasurePoint
++{
++    bool valid;
++    Vector3 pos;
++};
++
++static MeasurePoint g_measurePoints[3] = { { false }, { false }, { false } };
++
++static bool worldToScreen(const Vector3 &worldPos, int viewportW, int viewportH, ImVec2 *out)
++{
++    Matrix4 vp = _camera.projection() * _camera.view();
++    Vector4 clip = vp * Vector4(worldPos.x, worldPos.y, worldPos.z, 1.0f);
++
++    if (clip.w <= 1e-6f)
++        return false; /* behind the camera */
++
++    float ndcX = clip.x / clip.w;
++    float ndcY = clip.y / clip.w;
++
++    out->x = (ndcX * 0.5f + 0.5f) * (float)viewportW;
++    out->y = (1.0f - (ndcY * 0.5f + 0.5f)) * (float)viewportH;
++    return true;
++}
++
+ static void printPickResult(const PickResult &pick)
+ {
+     if (!pick.valid)
+@@ -401,6 +442,144 @@ static void drawTrianglePickOverlay()
+     ImGui::End();
+ }
+ 
++/* Screen-space crosshairs at each set measurement point, plus connecting
++   lines with an inline distance/angle label -- drawn straight onto ImGui's
++   foreground draw list (no 3D geometry, no new render pass) so a point
++   stays visually anchored to the model as the camera moves, the same way
++   the rest of this viewer's picking feedback works. */
++static void drawMeasureOverlay(int viewportW, int viewportH)
++{
++    static const ImU32 kPointColor[3] = {
++        IM_COL32(255, 80, 80, 255),
++        IM_COL32(80, 255, 80, 255),
++        IM_COL32(100, 170, 255, 255)
++    };
++
++    ImDrawList *draw = ImGui::GetForegroundDrawList();
++    ImVec2 screen[3];
++    bool onScreen[3] = { false, false, false };
++
++    for (int i = 0; i < 3; i++)
++    {
++        if (!g_measurePoints[i].valid)
++            continue;
++        onScreen[i] = worldToScreen(g_measurePoints[i].pos, viewportW, viewportH, &screen[i]);
++        if (onScreen[i])
++        {
++            draw->AddCircleFilled(screen[i], 5.0f, kPointColor[i]);
++            draw->AddText(ImVec2(screen[i].x + 8.0f, screen[i].y - 8.0f),
++                kPointColor[i], i == 0 ? "A" : i == 1 ? "B" : "C");
++        }
++    }
++
++    if (g_measurePoints[0].valid && g_measurePoints[1].valid)
++    {
++        float dist = length(g_measurePoints[1].pos - g_measurePoints[0].pos);
++        if (onScreen[0] && onScreen[1])
++        {
++            draw->AddLine(screen[0], screen[1], IM_COL32(255, 255, 0, 200), 1.5f);
++            ImVec2 mid((screen[0].x + screen[1].x) * 0.5f, (screen[0].y + screen[1].y) * 0.5f);
++            char buf[64];
++            snprintf(buf, sizeof(buf), "%.4f", dist);
++            draw->AddText(mid, IM_COL32(255, 255, 0, 255), buf);
++        }
++    }
++
++    if (g_measurePoints[0].valid && g_measurePoints[1].valid && g_measurePoints[2].valid)
++    {
++        Vector3 ba = g_measurePoints[0].pos - g_measurePoints[1].pos;
++        Vector3 bc = g_measurePoints[2].pos - g_measurePoints[1].pos;
++        float lba = length(ba), lbc = length(bc);
++        if (onScreen[1] && onScreen[2])
++            draw->AddLine(screen[1], screen[2], IM_COL32(255, 255, 0, 200), 1.5f);
++        if (lba > 1e-9f && lbc > 1e-9f && onScreen[1])
++        {
++            float cosA = mutil::clamp(dot(ba, bc) / (lba * lbc), -1.0f, 1.0f);
++            float angleDeg = acosf(cosA) * (180.0f / 3.14159265358979323846f);
++            char buf[64];
++            snprintf(buf, sizeof(buf), "%.2f deg", angleDeg);
++            draw->AddText(ImVec2(screen[1].x + 8.0f, screen[1].y + 10.0f),
++                IM_COL32(255, 255, 0, 255), buf);
++        }
++    }
++}
++
++static void drawMeasureTab()
++{
++    ImGui::TextWrapped("Ctrl+LeftClick a point in the viewport (see Triangle "
++        "Pick), then use a button below to add it as measurement point A, "
++        "B, or C. Distance uses A/B; angle (at B, between B->A and B->C) "
++        "needs all three.");
++    ImGui::TextWrapped("Values are in FILE UNITS, not millimeters -- PRC "
++        "carries a per-file CAD-unit scale, but this project could not "
++        "independently confirm which direction it converts, so it is not "
++        "applied here rather than risk a confidently-wrong mm figure.");
++
++    ImGui::Separator();
++
++    const char *labels[3] = { "Set Point A from last pick", "Set Point B from last pick", "Set Point C from last pick" };
++    for (int i = 0; i < 3; i++)
++    {
++        ImGui::PushID(i);
++        bool disabled = !g_lastPick.valid;
++        if (disabled)
++            ImGui::BeginDisabled();
++        if (ImGui::Button(labels[i]))
++        {
++            g_measurePoints[i].valid = true;
++            g_measurePoints[i].pos = g_lastPick.hitPos;
++        }
++        if (disabled)
++            ImGui::EndDisabled();
++        if (g_measurePoints[i].valid)
++        {
++            ImGui::SameLine();
++            ImGui::Text("(%.4f, %.4f, %.4f)", g_measurePoints[i].pos.x,
++                g_measurePoints[i].pos.y, g_measurePoints[i].pos.z);
++        }
++        ImGui::PopID();
++    }
++
++    if (ImGui::Button("Clear All"))
++    {
++        for (int i = 0; i < 3; i++)
++            g_measurePoints[i].valid = false;
++    }
++
++    ImGui::Separator();
++
++    if (g_measurePoints[0].valid && g_measurePoints[1].valid)
++    {
++        float dist = length(g_measurePoints[1].pos - g_measurePoints[0].pos);
++        ImGui::Text("Distance A-B: %.6f file units", dist);
++    }
++    else
++    {
++        ImGui::TextDisabled("Distance A-B: set points A and B");
++    }
++
++    if (g_measurePoints[0].valid && g_measurePoints[1].valid && g_measurePoints[2].valid)
++    {
++        Vector3 ba = g_measurePoints[0].pos - g_measurePoints[1].pos;
++        Vector3 bc = g_measurePoints[2].pos - g_measurePoints[1].pos;
++        float lba = length(ba), lbc = length(bc);
++        if (lba > 1e-9f && lbc > 1e-9f)
++        {
++            float cosA = mutil::clamp(dot(ba, bc) / (lba * lbc), -1.0f, 1.0f);
++            float angleDeg = acosf(cosA) * (180.0f / 3.14159265358979323846f);
++            ImGui::Text("Angle at B (A-B-C): %.4f degrees", angleDeg);
++        }
++        else
++        {
++            ImGui::TextDisabled("Angle at B (A-B-C): A or C coincides with B");
++        }
++    }
++    else
++    {
++        ImGui::TextDisabled("Angle at B (A-B-C): set points A, B, and C");
++    }
++}
++
+ static const char *normalDebugModeLabel(int mode)
+ {
+     switch (mode)
+@@ -477,6 +656,7 @@ static void drawControlHintsOverlay(int windowHeight)
+     {
+         ImGui::Text("Left drag: rotate | Middle drag: pan | Wheel: zoom | Home: reset view");
+         ImGui::Text("Ctrl+Left click: pick | F12: screenshot | F1: hide this");
++        ImGui::Text("Debug panel's Measure tab: distance/angle from picked points");
+     }
+     ImGui::End();
+ }
+@@ -1351,6 +1531,7 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+         mouse_over_debug = debugMenu(time, deltaTime);
+         drawNormalDebugOverlay();
+         drawTrianglePickOverlay();
++        drawMeasureOverlay(_scene.width(), _scene.height());
+         drawControlHintsOverlay(_scene.height());
+ 
+         _camera.upDateView(_scene.models()[0]);
+@@ -1828,6 +2009,12 @@ static bool debugMenu(float time, float deltaTime)
+             ImGui::EndTabItem();
+         }
+ 
++        if (ImGui::BeginTabItem("Measure"))
++        {
++            drawMeasureTab();
++            ImGui::EndTabItem();
++        }
++
+         if (ImGui::BeginTabItem("Shadows"))
+         {
+             ShadowMap *shadowMap = _scene.shadowMap();
+-- 
+2.47.3
+
