@@ -97,14 +97,16 @@ under **Scene**. "Reset View" and "Save Screenshot" are also available as
 buttons there (Camera and Main tabs) for anyone who'd rather click than
 memorize keys.
 
-**Known no-op: "Enable Auto Motion" (Main tab).** This checkbox does
-nothing — it's upstream nanoPRC code, unmodified by this project. The
-variable it toggles is never read anywhere in the render or update loop,
-and more fundamentally, nanoPRC's PRC parser has no animation/kinematic
-data model at all to drive it (nothing in the format's parsed structures
-represents motion), so there's no real content this could animate even if
-it were wired up. Left as-is rather than silently hidden, so it's at least
-honestly documented instead of a mystery.
+**Auto-rotate**: the **Views** tab's "Enable Auto Motion" checkbox (on by
+default) spins the model slowly around its own vertical axis when idle —
+useful for a hands-off turntable view, or just leaving something to look
+at on screen. It pauses automatically while you're actively rotating
+(left-drag) or panning (middle-drag) so it doesn't fight manual control.
+This checkbox is upstream nanoPRC UI, but upstream never wired it to
+anything — nanoPRC's PRC parser has no animation/kinematic data model at
+all (nothing in the format's parsed structures represents motion), so
+there was never any real per-file content it could have driven. This
+project repurposed it into the one thing "motion" can honestly mean here.
 
 **Cross-section**: the **Section** tab cuts the model away on one side of a
 plane (pick an axis, slide the offset, optionally flip which side is kept)
@@ -175,6 +177,18 @@ licensing.
   same triangles you see rendered), not the exact underlying CAD surface —
   for the handful of files in scope for patches/0005 above, that's a real
   but normally tiny difference from the true analytic distance.
+- `patches/0007-auto-motion-turntable.patch` — repurposes the previously
+  dead "Enable Auto Motion" checkbox into a real idle turntable auto-
+  rotate (see "Controls" above and "Auto-rotate" for why it was dead and
+  what "correcting" it could honestly mean given PRC has no per-file
+  motion data). Also fixes a bug caught while building it: an early
+  version rotated around the model matrix's own translation column, which
+  turned out to be wherever the file's coordinate origin sits (not the
+  model's visual center) — the cube visibly swung through an arc instead
+  of spinning in place. Fixed to rotate around the model's actual
+  world-space bounding-box center instead; see the patch's own commit
+  message for how this was caught and verified (two Xvfb screenshots a
+  few seconds apart, before and after the fix).
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 

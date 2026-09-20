@@ -1,0 +1,135 @@
+From 6f1e4954f95a87437a2d2c4b02bb360e718160e2 Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Sun, 20 Sep 2026 18:38:39 +0000
+Subject: [PATCH] Repurpose the dead "Enable Auto Motion" checkbox as turntable
+ auto-rotate
+
+The checkbox (Debug panel, Views tab) previously toggled a variable
+nothing ever read -- confirmed dead code, documented as a known no-op
+in a prior commit to this repo's README.md. Investigated whether it
+could drive real PRC-authored motion data instead: it can't, nanoPRC's
+parser has no animation/kinematic data model at all (nothing in
+prc_data.h represents motion), so there was no real content this
+could ever have animated even if wired up correctly. Repurposed it as
+the one thing "motion" can honestly mean here with no per-file data
+behind it: a plain idle turntable spin of the model around its own
+vertical axis, skipped while the user is mid left-drag or middle-drag
+so it doesn't fight manual rotate/pan.
+
+Composes the incremental rotation around the model's world-space
+bounding-box center (via _scene.bboxMin()/bboxMax(), transformed by
+the CURRENT model matrix so it tracks panning), not around the model
+matrix's own translation column. That distinction mattered in
+practice: the model matrix is identity at load (resetView() sets it
+to Matrix4(1.0f); auto-framing at load is done entirely via the
+CAMERA, not this matrix) so its translation column is wherever the
+file's own coordinate origin happens to sit -- usually nowhere near
+the geometry's visual center. An earlier version of this patch rotated
+around that instead, which was mathematically consistent (verified: it
+really was a pure rotation matrix around SOME point) but visibly wrong
+-- the whole cube swung through a wide arc instead of spinning in
+place, caught by comparing two screenshots taken 2 seconds apart under
+Xvfb and noticing the cube had visibly translated, not just turned.
+
+Verified interactively under Xvfb: with the checkbox at its default
+(enabled) state, two screenshots 2-5 seconds apart show the model
+centered in the same screen position with a different face rotated
+into view -- a clean spin, no drift. Unchecking the box and comparing
+two more screenshots 2 seconds apart confirms it stops completely
+(pixel-identical).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ demos/viewer/src/main.cpp | 61 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
+index b9457c0..88c39bd 100644
+--- a/demos/viewer/src/main.cpp
++++ b/demos/viewer/src/main.cpp
+@@ -55,6 +55,14 @@ static constexpr float kShiftMultiplier = 300.0f;
+ static constexpr float kTurnSpeed = 90.0f;
+ static constexpr float kMouseSensitivity = 15.0f;
+ 
++/* "Enable Auto Motion" (Debug panel, Main tab) was upstream dead code --
++   the checkbox toggled a variable nothing ever read, and there's no PRC-
++   authored motion/kinematic data for it to have driven anyway (nanoPRC's
++   parser has no such data model at all). Repurposed as a plain turntable
++   auto-rotate: the one thing "motion" can honestly mean here with no
++   per-file data behind it. */
++static constexpr float kAutoMotionSpeed = 18.0f; /* degrees/second */
++
+ static GLuint g_default_vao = 0;
+ 
+ static const DirLight kDirLight = {
+@@ -1504,15 +1512,50 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+             pickRequest = false;
+         }
+ 
+-        /* Rotation code */
+-#if 0
+-        Quaternion q = mutil::rotateaxis(Vector3(0.0f, 1.0f, 0.0f), time / 4.0f);
+-        // Quaternion q2 = mutil::rotateaxis(Vector3(1.0f, 0.0f, 0.0f), time / 2.0f);
+-        // Quaternion q = q1 * q2;
++        /* Auto Motion: idle turntable spin around the model's own vertical
++           (world Y) axis, composed the same way the wheel-zoom code above
++           composes its scale -- around the model's CURRENT position
++           (the world-space midpoint of the model's own bounding box,
++           carried through the current model matrix), not world origin or
++           the matrix's own translation column -- the model matrix is
++           identity at load (see resetView() above; auto-framing at load
++           is done entirely via the CAMERA, not this matrix), so its
++           translation column is wherever the file's own coordinate origin
++           happens to be, which is usually nowhere near the geometry's
++           visual center. Rotating around that instead of the bbox center
++           makes the model swing through a wide arc rather than spin in
++           place -- caught by comparing two screenshots a couple of
++           seconds apart under Xvfb and seeing the cube visibly translate,
++           not just turn. Skipped while the user is mid left-drag or
++           middle-drag so it doesn't fight manual rotate/pan in the same
++           frame. */
++        if (_scene.enableMotion() && !mouseDown && !middleMouseDown)
++        {
++            Matrix4 modelMat = _scene.models()[0].model();
++            float angleRad = (kAutoMotionSpeed * deltaTime) * (3.14159265358979323846f / 180.0f);
++            Matrix4 rotDelta = mutil::rotate(Matrix4(1.0f), angleRad, Vector3(0.0f, 1.0f, 0.0f));
++
++            /* _scene.bboxMin()/bboxMax() were computed once at load time,
++               while the model matrix was still identity, so they're valid
++               LOCAL (file-space) coordinates here, not just world-space
++               coordinates for that one moment -- transformPoint by the
++               CURRENT model matrix below is what makes the pivot track
++               any panning/zooming done since. */
++            const double *bmin = _scene.bboxMin();
++            const double *bmax = _scene.bboxMax();
++            Vector3 localCenter(
++                (float)((bmin[0] + bmax[0]) * 0.5),
++                (float)((bmin[1] + bmax[1]) * 0.5),
++                (float)((bmin[2] + bmax[2]) * 0.5));
++            Vector3 pivot = transformPoint(modelMat, localCenter);
++
++            Matrix4 toPivot = mutil::translate(Matrix4(1.0f), -1.0f * pivot);
++            Matrix4 fromPivot = mutil::translate(Matrix4(1.0f), pivot);
+ 
+-        for (uint32_t i = 0; i < _scene.numModels(); i++)
+-            _scene.models()[i].setRotation(q);
+-#endif
++            Matrix4 mat = fromPivot * rotDelta * toPivot;
++            mat = mat * modelMat;
++            _scene.models()[0].setModel(mat);
++        }
+         // daylightCycle(scene, time);
+ 
+         glDisable(GL_CULL_FACE);
+@@ -2082,6 +2125,8 @@ static bool debugMenu(float time, float deltaTime)
+             /* If selected value is different than current one then update it */
+ 
+             ImGui::Checkbox("Enable Auto Motion", &_scene.enableMotion());
++            ImGui::SameLine();
++            ImGui::TextDisabled("(turntable spin around the model's own vertical axis)");
+             ImGui::EndTabItem();
+         }
+         ImGui::EndTabBar();
+-- 
+2.47.3
+

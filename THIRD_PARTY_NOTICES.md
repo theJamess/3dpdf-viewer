@@ -44,6 +44,10 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
     and in-viewport overlay to `demos/viewer/src/main.cpp`: point-to-point
     distance and three-point angle, built on the existing triangle-pick
     ray-cast (see README.md's "Controls" section).
+  - `patches/0007-auto-motion-turntable.patch` repurposes the previously
+    dead "Enable Auto Motion" checkbox (Views tab) in
+    `demos/viewer/src/main.cpp` into a real idle turntable auto-rotate
+    (see README.md's "Controls" section).
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,
