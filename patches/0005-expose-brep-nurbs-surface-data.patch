@@ -1,0 +1,1234 @@
+From 6ac39f5d4cf66fc00bbf1b013ee9187c53307b22 Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Sun, 20 Sep 2026 14:44:26 +0000
+Subject: [PATCH] Expose uncompressed B-Rep NURBS surface data through a new
+ public API
+
+Adds prc_api_get_number_brep_bodies/_shells/_faces, prc_api_get_face_
+surface_type, prc_api_get_face_nurbs_surface, and prc_api_release_
+nurbs_surface: a face's exact mathematical surface (degree, control
+points with weights, knot vectors in both parametric directions) is
+now readable directly, not just as tessellated triangles.
+
+nanoPRC already parses this data in full (prc_parse_surf_nurbs) and
+already evaluates it internally (prc_evaluate_surf_nurbs) to build
+tessellations -- it just never handed it back out. This only copies
+already-parsed fields into a public-facing struct; no new geometry
+math.
+
+SCOPE, the significant limitation: only PRC_TYPE_TOPO_BrepData bodies
+(the *uncompressed* B-Rep encoding) with exactly one connex and every
+connex/shell/face link stored inline are addressable at all -- the
+same restriction nanoPRC's own tessellator applies before it will
+tessellate a BrepData body (prc_approximate_objects_exact_geom). Within
+an addressable body, only PRC_TYPE_SURF_NURBS faces decode to real
+data; every other analytic surface type (Plane, Cylinder, Cone, ...)
+reports PRC_API_SURFACE_UNKNOWN, as does anything reached through
+PRC_TYPE_TOPO_BrepDataCompress -- the *compressed* B-Rep encoding most
+real-world CAD-authored 3D PDFs actually use, which reconstructs each
+face's geometry through a bespoke per-face-type synthesis process this
+patch does not decode. Checked against this project's own 7 test
+files via tests/internal/brep_entity_census: only cylinder.pdf has an
+addressable uncompressed body at all, and its one face is an analytic
+Cylinder, not NURBS -- so on every file this project has on hand,
+including the one that does have usable uncompressed geometry, this
+API currently returns UNKNOWN. That is a real, known, and currently
+permanent limitation, not a bug.
+
+Indexing design note: an earlier version of this patch addressed
+bodies through data->exact_geom_tess_part, the same index
+prc_api_get_exact_geometry_tessellation_vertices uses. That array is
+only populated as a side effect of prc_api_prep_model_tree, and only
+for representation items with NO regular tessellation of their own
+(nanoPRC's fallback path for tessellation-free files). Real files
+overwhelmingly ship a pre-baked tessellation alongside their exact
+geometry -- cylinder.pdf included -- so that indexing was empty for
+every file tested, in practice a no-op rather than reduced coverage.
+prc_api_get_number_brep_bodies instead walks each file structure's
+FileStructureExactGeometry section directly, independent of whether a
+tessellation exists, and needs no prep_model_tree call first.
+
+Also fixes the doc comment on control-point ordering: it read
+"row-major order (u varies fastest)", which is backwards from
+prc_evaluate_surf_nurbs's own indexing (index = ctrl_u * num_ctrl_v +
+ctrl_v -- u varies SLOWEST, v fastest, i.e. u-major). Caught by writing
+tests/internal/check_nurbs_surface_api_unit.c against known input and
+noticing the doc comment disagreed with the working code.
+
+Verification:
+- tests/internal/check_nurbs_surface_api_unit.c: hand-builds a minimal
+  in-memory prc_data (no parser, no file I/O) with a known non-rational
+  and a known rational NURBS patch, and checks the API returns the fed-
+  in degree/control-points/knots exactly, that non-rational control_w
+  reads back as 1.0, and that out-of-range indices fail cleanly. This
+  exists because no available sample PDF exercises the NURBS path (see
+  SCOPE above) -- it covers the code this patch actually adds (the
+  body/shell/face walk and the struct-to-public-API copy), not the
+  pre-existing parser. Passes clean under valgrind --leak-check=full
+  (0 errors, all allocations freed).
+- tests/internal/check_nurbs_surface_api.c: runs the real API against
+  an actual file (cylinder.pdf), also valgrind-clean; confirms the
+  Cylinder-not-NURBS UNKNOWN result via independent cross-check against
+  brep_entity_census's surface-type census.
+- scan_prc against all 7 project test files (3 bundled examples +
+  enclosure.pdf + 3 Tetra4D samples): unchanged tessellation output,
+  no regression from the header/API additions.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ include/prc_api.h                             | 194 ++++++++++
+ src/prc_tri_primitives_api.c                  | 331 ++++++++++++++++++
+ tests/internal/CMakeLists.txt                 |   8 +
+ tests/internal/check_nurbs_surface_api.c      | 250 +++++++++++++
+ tests/internal/check_nurbs_surface_api_unit.c | 316 +++++++++++++++++
+ 5 files changed, 1099 insertions(+)
+ create mode 100644 tests/internal/check_nurbs_surface_api.c
+ create mode 100644 tests/internal/check_nurbs_surface_api_unit.c
+
+diff --git a/include/prc_api.h b/include/prc_api.h
+index 15688dc..015c74d 100644
+--- a/include/prc_api.h
++++ b/include/prc_api.h
+@@ -670,6 +670,200 @@ PRC_EXPORT int prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx
+  */
+ PRC_EXPORT void prc_api_release_exact_geometry_tessellation(prc_context *ctx, prc_api_tess *tess);
+ 
++/**
++ * @brief Exact-geometry surface types this API can report/expose.
++ *
++ * Deliberately much smaller than PRC_TYPE_SURF_* (src/prc_data.h): this
++ * only names the cases prc_api_get_face_surface_type and
++ * prc_api_get_face_nurbs_surface actually recognize today. Every other
++ * surface shape -- including NURBS faces reached through PRC's
++ * *compressed* B-Rep body encoding (PRC_TYPE_TOPO_BrepDataCompress; see
++ * the SCOPE note on prc_api_get_face_surface_type) -- reports UNKNOWN,
++ * even though such a face tessellates and displays completely normally
++ * through prc_api_get_exact_geometry_tessellation_vertices. UNKNOWN here
++ * means "not exposed by this API", not "malformed" or "unsupported by
++ * the renderer".
++ */
++typedef enum
++{
++    PRC_API_SURFACE_UNKNOWN = 0,
++    PRC_API_SURFACE_NURBS = 1
++} prc_api_surface_type;
++
++/**
++ * @brief Number of B-Rep bodies this API's face/surface functions can
++ * address, across every file structure in the loaded document.
++ *
++ * This indexes PRC_TYPE_TOPO_BrepData bodies directly out of each file
++ * structure's exact-geometry section (FileStructureExactGeometry, Table
++ * 50) -- it does NOT go through the model tree, and does NOT require
++ * prc_api_prep_model_tree/prc_api_create_model_tree to have been called
++ * first. That matters: an earlier version of this API reused the
++ * exact_geom_tess_part indexing prc_api_get_exact_geometry_tessellation_
++ * vertices addresses, which is only populated for representation items
++ * that have NO regular tessellation of their own (nanoPRC's fallback path
++ * for tessellation-free files). Real-world 3D PDFs -- including ones with
++ * perfectly usable uncompressed BrepData, like this project's own
++ * examples/cylinder.pdf -- almost always ship a pre-baked tessellation
++ * alongside their exact geometry, so that indexing was empty for them in
++ * practice: not merely reduced coverage, but the API doing nothing on the
++ * files it was meant for. This index space is independent of whether a
++ * tessellation exists, so it sees a body's exact geometry whether or not
++ * the file also carries a rendered mesh for it.
++ *
++ * A body only gets an index here if it also passes the same restriction
++ * prc_api_get_face_surface_type documents: exactly one connex, and every
++ * connex/shell/face link in the chain stored inline rather than
++ * referenced. A body that fails that restriction (multi-connex, or any
++ * PRC_TYPE_TOPO_BrepDataCompress body -- see that same SCOPE note) is not
++ * counted and has no index at all, rather than an index that then reports
++ * UNKNOWN/zero shells; use tests/internal's brep_entity_census tool if you
++ * need to know ahead of time how many of a file's bodies will be in scope.
++ *
++ * @param ctx Active API context.
++ * @param data_in Data handle from prc_api_open_contents.
++ * @return Number of addressable B-Rep bodies (0 or more), or 0 on a NULL/
++ *         invalid data handle.
++ */
++PRC_EXPORT uint32_t prc_api_get_number_brep_bodies(prc_context *ctx, prc_api_data data_in);
++
++/**
++ * @brief Number of shells in one B-Rep body (see prc_api_get_number_brep_
++ * bodies for the body_index space).
++ *
++ * @param ctx Active API context.
++ * @param data_in Data handle from prc_api_open_contents.
++ * @param body_index B-Rep body index (0 <= body_index < prc_api_get_number_brep_bodies()).
++ * @return Number of shells, or 0 for an out-of-range body_index.
++ */
++PRC_EXPORT uint32_t prc_api_get_number_brep_shells(prc_context *ctx, prc_api_data data_in,
++    uint32_t body_index);
++
++/**
++ * @brief Number of faces in one shell of one B-Rep body.
++ *
++ * @param ctx Active API context.
++ * @param data_in Data handle from prc_api_open_contents.
++ * @param body_index B-Rep body index.
++ * @param shell_index Shell index in the body (0 <= shell_index < prc_api_get_number_brep_shells()).
++ * @return Number of faces, or 0 for an out-of-range body_index/shell_index.
++ */
++PRC_EXPORT uint32_t prc_api_get_number_brep_faces(prc_context *ctx, prc_api_data data_in,
++    uint32_t body_index, uint32_t shell_index);
++
++/**
++ * @brief Report which exact-geometry surface type one face carries, for a
++ * (body_index, shell_index, face_index) triple addressed through
++ * prc_api_get_number_brep_bodies/_shells/_faces above.
++ *
++ * SCOPE, IMPORTANT: only recognizes faces reached through PRC's
++ * *uncompressed* B-Rep body encoding (PRC_TYPE_TOPO_BrepData) belonging to
++ * a body with exactly one connex, whose connex/shell/face chain is stored
++ * inline rather than referenced (matches the restriction nanoPRC's own
++ * exact-geometry tessellator applies in prc_approximate_objects_exact_geom
++ * before it will even attempt to tessellate a BrepData body -- see that
++ * function's "single_connex"/is_stored checks in
++ * src/prc_tessellation_exact_geom.c). Bodies that fail that restriction,
++ * or use PRC's *compressed* B-Rep encoding (PRC_TYPE_TOPO_BrepDataCompress)
++ * -- which most real-world CAD-authored 3D PDFs use, and which
++ * reconstructs each face's geometry through a bespoke, face-type-specific
++ * synthesis process this function does not decode -- are excluded from
++ * the body_index space entirely (see prc_api_get_number_brep_bodies), so
++ * within a valid body_index every face is guaranteed to have a real
++ * surface; PRC_API_SURFACE_UNKNOWN here means only "this face's surface
++ * type isn't one of the (currently one) types this API decodes" -- e.g. a
++ * plane, cylinder, or any analytic type other than NURBS. That is a real,
++ * known, and currently permanent limitation of this API, not a bug to
++ * work around by retrying.
++ *
++ * @param ctx Active API context.
++ * @param data_in Data handle from prc_api_open_contents.
++ * @param body_index B-Rep body index.
++ * @param shell_index Shell index in the body.
++ * @param face_index Face index in the shell.
++ * @param out_type Output surface type.
++ * @return 0 on success (including the UNKNOWN case -- that is a normal
++ *         result, not a failure), negative PRC_API_ERROR_* or PRC_ERROR_*
++ *         code only for an out-of-range index or a malformed file.
++ */
++PRC_EXPORT int prc_api_get_face_surface_type(prc_context *ctx, prc_api_data data_in,
++    uint32_t body_index, uint32_t shell_index, uint32_t face_index,
++    prc_api_surface_type *out_type);
++
++/**
++ * @brief One NURBS surface's full mathematical representation: degree,
++ * control points (with weights, for the rational case), and knot vectors
++ * in both parametric directions -- everything prc_evaluate_surf_nurbs
++ * (src/prc_tessellation_exact_geom.c), nanoPRC's own internal NURBS
++ * evaluator, needs to compute a point on the surface, exposed for a
++ * caller to do the same thing outside this library (measurement, export
++ * to another representation, etc).
++ *
++ * This is the UNTRIMMED surface: a full rectangular NURBS patch over its
++ * declared knot domain, not clipped to the owning face's actual visible
++ * boundary. PRC's trim-loop data (the curves that bound a face within
++ * its surface) is not exposed by this API.
++ *
++ * Control points are stored flattened u-major -- index = u_index *
++ * num_control_points_v + v_index, so v varies fastest within each fixed
++ * u -- length num_control_points_u * num_control_points_v. This matches
++ * prc_evaluate_surf_nurbs's own indexing (see that function's comment in
++ * src/prc_tessellation_exact_geom.c) exactly; do not transpose it.
++ * control_w is only meaningful when is_rational is nonzero; nanoPRC still
++ * populates it (as 1.0 per point) in the non-rational case, so it is
++ * always safe to
++ * read.
++ */
++typedef struct prc_api_nurbs_surface_s
++{
++    uint8_t is_rational;
++    uint32_t degree_u;
++    uint32_t degree_v;
++    uint32_t num_control_points_u;
++    uint32_t num_control_points_v;
++    double *control_x;
++    double *control_y;
++    double *control_z;
++    double *control_w;
++    uint32_t num_knots_u;
++    double *knot_vector_u;
++    uint32_t num_knots_v;
++    double *knot_vector_v;
++} prc_api_nurbs_surface;
++
++/**
++ * @brief For a face whose prc_api_get_face_surface_type reports
++ * PRC_API_SURFACE_NURBS, copy out its full control-point/knot-vector/
++ * degree representation. Same (body_index, shell_index, face_index)
++ * addressing and the same SCOPE restriction as prc_api_get_face_surface_
++ * type -- call that first and check for PRC_API_SURFACE_NURBS; this
++ * function returns PRC_API_ERROR_PARAMETER for a face of any other type
++ * (including UNKNOWN), rather than silently populating nonsense.
++ *
++ * @param ctx Active API context.
++ * @param data_in Data handle from prc_api_open_contents.
++ * @param body_index B-Rep body index.
++ * @param shell_index Shell index in the body.
++ * @param face_index Face index in the shell.
++ * @param out_surface Output surface data; caller must release with
++ *                     prc_api_release_nurbs_surface.
++ * @return 0 on success, negative PRC_API_ERROR_* or PRC_ERROR_* code on
++ *         failure (including "this face isn't NURBS").
++ */
++PRC_EXPORT int prc_api_get_face_nurbs_surface(prc_context *ctx, prc_api_data data_in,
++    uint32_t body_index, uint32_t shell_index, uint32_t face_index,
++    prc_api_nurbs_surface *out_surface);
++
++/**
++ * @brief Free the control-point/knot-vector arrays populated by
++ * prc_api_get_face_nurbs_surface. Safe to call on a zero-initialized or
++ * already-released prc_api_nurbs_surface (all fields NULL).
++ *
++ * @param ctx Active API context.
++ * @param surface Surface data to release.
++ */
++PRC_EXPORT void prc_api_release_nurbs_surface(prc_context *ctx, prc_api_nurbs_surface *surface);
++
+ /**
+  * @brief Get one graphics primitive descriptor by index.
+  *
+diff --git a/src/prc_tri_primitives_api.c b/src/prc_tri_primitives_api.c
+index 60fb79b..bc6a8ba 100644
+--- a/src/prc_tri_primitives_api.c
++++ b/src/prc_tri_primitives_api.c
+@@ -3442,6 +3442,337 @@ failure:
+     return code;
+ }
+ 
++/* Whether a body is addressable through the prc_api_get_number_brep_bodies
++   index space: PRC_TYPE_TOPO_BrepData, exactly one connex, stored inline.
++   Same restriction prc_approximate_objects_exact_geom (src/prc_tessellation_
++   exact_geom.c) applies before it will tessellate a BrepData body. */
++static int
++prc_api_helper_body_is_indexable_brep(prc_topo *body_topo)
++{
++    prc_topo_brep_data *brep_data;
++
++    if (body_topo->tag != PRC_TYPE_TOPO_BrepData)
++        return 0; /* Most commonly PRC_TYPE_TOPO_BrepDataCompress -- see doc comment. */
++
++    brep_data = body_topo->topo_brep_data;
++    if (brep_data->number_of_connex != 1)
++        return 0;
++
++    if (brep_data->connex[0].is_stored)
++        return 0;
++
++    return 1;
++}
++
++/* Shared navigation for prc_api_get_number_brep_shells/_faces and
++   prc_api_get_face_surface_type/_nurbs_surface: walks file_struct ->
++   exact_geometry -> topo_contexts -> bodies in order, deliberately
++   independent of data->exact_geom_tess_part (that array is only populated
++   as a side effect of prc_api_prep_model_tree, and only for representation
++   items that have NO regular tessellation of their own -- see the SCOPE
++   note on prc_api_get_number_brep_bodies in prc_api.h for why indexing
++   through it made this API a no-op on real-world files). Returns NULL
++   (not an error) for a body_index that is in range of "bodies that exist"
++   but not of "bodies this API indexes" -- that can't happen for a
++   body_index that came from prc_api_get_number_brep_bodies itself, but
++   this is also reachable directly, so the guard stays. Sets *out_code
++   negative only for an actual out-of-range index. */
++static prc_topo *
++prc_api_helper_locate_brep_body(prc_context *ctx, prc_data *data,
++    uint32_t body_index, int *out_code)
++{
++    uint32_t i, j, k, seen = 0;
++
++    *out_code = 0;
++
++    for (i = 0; i < data->file_structure_count; i++)
++    {
++        uint32_t topo_context_count;
++
++        if (data->file_struct[i].geometry == NULL)
++            continue;
++
++        topo_context_count = data->file_struct[i].geometry->exact_geometry.topo_context_count;
++        for (j = 0; j < topo_context_count; j++)
++        {
++            prc_topo_context *tc = &data->file_struct[i].geometry->exact_geometry.topo_contexts[j];
++
++            for (k = 0; k < tc->number_of_bodies; k++)
++            {
++                if (!prc_api_helper_body_is_indexable_brep(&tc->bodies[k]))
++                    continue;
++
++                if (seen == body_index)
++                    return &tc->bodies[k];
++
++                seen++;
++            }
++        }
++    }
++
++    prc_error(ctx, PRC_API_ERROR_PARAMETER,
++        "B-Rep body index out of range in prc_api_helper_locate_brep_body\n");
++    *out_code = PRC_API_ERROR_PARAMETER;
++    return NULL;
++}
++
++PRC_EXPORT uint32_t
++prc_api_get_number_brep_bodies(prc_context *ctx, prc_api_data data_in)
++{
++    prc_data *data = (prc_data *)data_in;
++    uint32_t i, j, k, count = 0;
++
++    if (data == NULL)
++        return 0;
++
++    for (i = 0; i < data->file_structure_count; i++)
++    {
++        uint32_t topo_context_count;
++
++        if (data->file_struct[i].geometry == NULL)
++            continue;
++
++        topo_context_count = data->file_struct[i].geometry->exact_geometry.topo_context_count;
++        for (j = 0; j < topo_context_count; j++)
++        {
++            prc_topo_context *tc = &data->file_struct[i].geometry->exact_geometry.topo_contexts[j];
++
++            for (k = 0; k < tc->number_of_bodies; k++)
++            {
++                if (prc_api_helper_body_is_indexable_brep(&tc->bodies[k]))
++                    count++;
++            }
++        }
++    }
++
++    return count;
++}
++
++PRC_EXPORT uint32_t
++prc_api_get_number_brep_shells(prc_context *ctx, prc_api_data data_in, uint32_t body_index)
++{
++    prc_data *data = (prc_data *)data_in;
++    prc_topo *body_topo;
++    int code = 0;
++
++    body_topo = prc_api_helper_locate_brep_body(ctx, data, body_index, &code);
++    if (body_topo == NULL)
++        return 0;
++
++    return body_topo->topo_brep_data->connex[0].topo->topo_connex->number_of_shells;
++}
++
++PRC_EXPORT uint32_t
++prc_api_get_number_brep_faces(prc_context *ctx, prc_api_data data_in,
++    uint32_t body_index, uint32_t shell_index)
++{
++    prc_data *data = (prc_data *)data_in;
++    prc_topo *body_topo;
++    prc_topo_connex *connex;
++    prc_ptr_topology *shell_ptr;
++    int code = 0;
++
++    body_topo = prc_api_helper_locate_brep_body(ctx, data, body_index, &code);
++    if (body_topo == NULL)
++        return 0;
++
++    connex = body_topo->topo_brep_data->connex[0].topo->topo_connex;
++    if (shell_index >= connex->number_of_shells)
++    {
++        prc_error(ctx, PRC_API_ERROR_PARAMETER,
++            "Shell index out of range in prc_api_get_number_brep_faces\n");
++        return 0;
++    }
++
++    shell_ptr = &connex->shells[shell_index];
++    if (shell_ptr->is_stored)
++        return 0; /* Referenced rather than inline -- outside this API's scope. */
++
++    return shell_ptr->topo->topo_shell->number_of_faces;
++}
++
++/* Shared navigation for prc_api_get_face_surface_type and
++   prc_api_get_face_nurbs_surface: walks from a (body_index, shell_index,
++   face_index) triple down to the prc_topo_face carrying that face's
++   surface. Returns NULL (not an error) for a shell/face link that is
++   referenced rather than stored inline -- outside this API's scope, see
++   the SCOPE note on prc_api_get_face_surface_type in prc_api.h. Returns
++   NULL and sets *out_code negative only for an actual out-of-range
++   index. */
++static prc_topo_face *
++prc_api_helper_get_topo_face_for_brep_body(prc_context *ctx, prc_data *data,
++    uint32_t body_index, uint32_t shell_index, uint32_t face_index,
++    int *out_code)
++{
++    prc_topo *body_topo;
++    prc_topo_connex *connex;
++    prc_ptr_topology *shell_ptr;
++    prc_topo_shell *shell;
++    prc_ptr_topology *face_ptr;
++
++    body_topo = prc_api_helper_locate_brep_body(ctx, data, body_index, out_code);
++    if (body_topo == NULL)
++        return NULL;
++
++    connex = body_topo->topo_brep_data->connex[0].topo->topo_connex;
++
++    if (shell_index >= connex->number_of_shells)
++    {
++        prc_error(ctx, PRC_API_ERROR_PARAMETER,
++            "Shell index out of range in prc_api_helper_get_topo_face_for_brep_body\n");
++        *out_code = PRC_API_ERROR_PARAMETER;
++        return NULL;
++    }
++
++    shell_ptr = &connex->shells[shell_index];
++    if (shell_ptr->is_stored)
++        return NULL;
++    shell = shell_ptr->topo->topo_shell;
++
++    if (face_index >= shell->number_of_faces)
++    {
++        prc_error(ctx, PRC_API_ERROR_PARAMETER,
++            "Face index out of range in prc_api_helper_get_topo_face_for_brep_body\n");
++        *out_code = PRC_API_ERROR_PARAMETER;
++        return NULL;
++    }
++
++    face_ptr = &shell->faces[face_index].face;
++    if (face_ptr->is_stored)
++        return NULL;
++
++    return face_ptr->topo->topo_face;
++}
++
++PRC_EXPORT int
++prc_api_get_face_surface_type(prc_context *ctx, prc_api_data data_in,
++    uint32_t body_index, uint32_t shell_index, uint32_t face_index,
++    prc_api_surface_type *out_type)
++{
++    prc_data *data = (prc_data *)data_in;
++    prc_topo_face *topo_face;
++    int code = 0;
++
++    if (out_type == NULL)
++    {
++        prc_error(ctx, PRC_API_ERROR_PARAMETER, "out_type is NULL in prc_api_get_face_surface_type\n");
++        return PRC_API_ERROR_PARAMETER;
++    }
++    *out_type = PRC_API_SURFACE_UNKNOWN;
++
++    topo_face = prc_api_helper_get_topo_face_for_brep_body(ctx, data,
++        body_index, shell_index, face_index, &code);
++    if (code < 0)
++        return code;
++    if (topo_face == NULL)
++        return 0; /* In scope for the index range, just not a recognized case -- UNKNOWN, not an error. */
++
++    if (topo_face->surface_geometry.surface.surface_type == PRC_TYPE_SURF_NURBS)
++        *out_type = PRC_API_SURFACE_NURBS;
++
++    return 0;
++}
++
++PRC_EXPORT int
++prc_api_get_face_nurbs_surface(prc_context *ctx, prc_api_data data_in,
++    uint32_t body_index, uint32_t shell_index, uint32_t face_index,
++    prc_api_nurbs_surface *out_surface)
++{
++    prc_data *data = (prc_data *)data_in;
++    prc_topo_face *topo_face;
++    prc_surf_nurbs *nurbs;
++    uint32_t num_cp, num_ku, num_kv, i;
++    int code = 0;
++
++    if (out_surface == NULL)
++    {
++        prc_error(ctx, PRC_API_ERROR_PARAMETER, "out_surface is NULL in prc_api_get_face_nurbs_surface\n");
++        return PRC_API_ERROR_PARAMETER;
++    }
++    memset(out_surface, 0, sizeof(*out_surface));
++
++    topo_face = prc_api_helper_get_topo_face_for_brep_body(ctx, data,
++        body_index, shell_index, face_index, &code);
++    if (code < 0)
++        return code;
++    if (topo_face == NULL || topo_face->surface_geometry.surface.surface_type != PRC_TYPE_SURF_NURBS)
++    {
++        prc_error(ctx, PRC_API_ERROR_PARAMETER,
++            "Face is not a NURBS surface (call prc_api_get_face_surface_type first) in prc_api_get_face_nurbs_surface\n");
++        return PRC_API_ERROR_PARAMETER;
++    }
++
++    nurbs = topo_face->surface_geometry.surface.surf_nurbs;
++
++    out_surface->is_rational = nurbs->is_rational;
++    out_surface->degree_u = nurbs->du;
++    out_surface->degree_v = nurbs->dv;
++    out_surface->num_control_points_u = nurbs->highest_index_of_control_points_u + 1;
++    out_surface->num_control_points_v = nurbs->highest_index_of_control_points_v + 1;
++    out_surface->num_knots_u = nurbs->highest_index_of_knots_u + 1;
++    out_surface->num_knots_v = nurbs->highest_index_of_knots_v + 1;
++
++    num_cp = out_surface->num_control_points_u * out_surface->num_control_points_v;
++    num_ku = out_surface->num_knots_u;
++    num_kv = out_surface->num_knots_v;
++
++    out_surface->control_x = (double *)prc_calloc(ctx, num_cp ? num_cp : 1, sizeof(double));
++    out_surface->control_y = (double *)prc_calloc(ctx, num_cp ? num_cp : 1, sizeof(double));
++    out_surface->control_z = (double *)prc_calloc(ctx, num_cp ? num_cp : 1, sizeof(double));
++    out_surface->control_w = (double *)prc_calloc(ctx, num_cp ? num_cp : 1, sizeof(double));
++    out_surface->knot_vector_u = (double *)prc_calloc(ctx, num_ku ? num_ku : 1, sizeof(double));
++    out_surface->knot_vector_v = (double *)prc_calloc(ctx, num_kv ? num_kv : 1, sizeof(double));
++    if (out_surface->control_x == NULL || out_surface->control_y == NULL ||
++        out_surface->control_z == NULL || out_surface->control_w == NULL ||
++        out_surface->knot_vector_u == NULL || out_surface->knot_vector_v == NULL)
++    {
++        prc_api_release_nurbs_surface(ctx, out_surface);
++        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_get_face_nurbs_surface\n");
++        return PRC_ERROR_MEMORY;
++    }
++
++    for (i = 0; i < num_cp; i++)
++    {
++        out_surface->control_x[i] = nurbs->p[i].x;
++        out_surface->control_y[i] = nurbs->p[i].y;
++        out_surface->control_z[i] = nurbs->p[i].z;
++        /* nurbs->p[i].w is only meaningful when is_rational; nanoPRC's
++           parser leaves it at its calloc'd 0.0 otherwise, which would
++           silently zero every non-rational control point under a
++           homogeneous-coordinate evaluator (x,y,z,w) -- normalize to 1.0
++           here so the output is always safe to treat as w-meaningful. */
++        out_surface->control_w[i] = nurbs->is_rational ? nurbs->p[i].w : 1.0;
++    }
++    for (i = 0; i < num_ku; i++)
++        out_surface->knot_vector_u[i] = nurbs->knot_vector_u[i];
++    for (i = 0; i < num_kv; i++)
++        out_surface->knot_vector_v[i] = nurbs->knot_vector_v[i];
++
++    return 0;
++}
++
++PRC_EXPORT void
++prc_api_release_nurbs_surface(prc_context *ctx, prc_api_nurbs_surface *surface)
++{
++    if (surface == NULL)
++        return;
++
++    if (surface->control_x != NULL)
++        prc_free(ctx, surface->control_x);
++    if (surface->control_y != NULL)
++        prc_free(ctx, surface->control_y);
++    if (surface->control_z != NULL)
++        prc_free(ctx, surface->control_z);
++    if (surface->control_w != NULL)
++        prc_free(ctx, surface->control_w);
++    if (surface->knot_vector_u != NULL)
++        prc_free(ctx, surface->knot_vector_u);
++    if (surface->knot_vector_v != NULL)
++        prc_free(ctx, surface->knot_vector_v);
++
++    memset(surface, 0, sizeof(*surface));
++}
++
+ /* tess_index_in is an index into the tessellations in part_details or
+    markup_details in prc_data */
+ PRC_EXPORT int
+diff --git a/tests/internal/CMakeLists.txt b/tests/internal/CMakeLists.txt
+index 6b5a1e5..c4869ff 100644
+--- a/tests/internal/CMakeLists.txt
++++ b/tests/internal/CMakeLists.txt
+@@ -88,6 +88,14 @@ add_executable(check_grid_radius tests/internal/check_grid_radius.c)
+ target_link_libraries(check_grid_radius prc_static)
+ target_include_directories(check_grid_radius PRIVATE tests)
+ 
++add_executable(check_nurbs_surface_api tests/internal/check_nurbs_surface_api.c)
++target_link_libraries(check_nurbs_surface_api prc_static)
++target_include_directories(check_nurbs_surface_api PRIVATE tests)
++
++add_executable(check_nurbs_surface_api_unit tests/internal/check_nurbs_surface_api_unit.c)
++target_link_libraries(check_nurbs_surface_api_unit prc_static)
++target_include_directories(check_nurbs_surface_api_unit PRIVATE tests)
++
+ add_executable(dump_raw_tess_arrays tests/internal/dump_raw_tess_arrays.c)
+ target_link_libraries(dump_raw_tess_arrays prc_static)
+ target_include_directories(dump_raw_tess_arrays PRIVATE tests)
+diff --git a/tests/internal/check_nurbs_surface_api.c b/tests/internal/check_nurbs_surface_api.c
+new file mode 100644
+index 0000000..8bff91b
+--- /dev/null
++++ b/tests/internal/check_nurbs_surface_api.c
+@@ -0,0 +1,250 @@
++/* Copyright (C) 2023-2026 CascadiaVoxel LLC
++
++    nanoPRC is free software: you can redistribute it and/or modify it under
++    the terms of the GNU Affero General Public License as published by the
++    Free Software Foundation, either version 3 of the License, or (at your
++    option) any later version.
++
++    nanoPRC is distributed in the hope that it will be useful, but WITHOUT
++    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++    FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
++    License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
++*/
++
++/* INTERNAL DEVELOPMENT TOOL -- not part of the permanent test suite, not
++   registered with CTest, no exit-code contract to keep stable.
++
++   WHAT: Exercises the new prc_api_get_face_surface_type / prc_api_get_face_
++   nurbs_surface API (uncompressed BrepData NURBS exposure) end to end and
++   cross-validates the returned control points/knots/degree independently
++   of nanoPRC's own tessellator: it evaluates the surface itself (a
++   from-scratch Cox-de Boor implementation written in THIS file, sharing no
++   code with prc_evaluate_surf_nurbs in prc_tessellation_exact_geom.c)
++   across a grid of (u,v) and checks the resulting points lie at a constant
++   radius from the Z axis -- the defining property of a cylinder, which is
++   what cylinder.pdf actually contains, so a bug in either the extraction
++   (wrong control points/knots/degree) or a transposed u/v would show up as
++   a non-constant radius or NaNs, not just "some numbers came out".
++
++   usage: check_nurbs_surface_api <cylinder.pdf> [expected_radius] [tol] */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include "prc_api.h"
++
++static double
++basis_function(uint32_t i, uint32_t degree, double t, const double *knots, uint32_t num_knots)
++{
++    double left, right, c1, c2;
++
++    if (degree == 0)
++    {
++        if (knots[i] <= t && (t < knots[i + 1] || (t == knots[i + 1] && i + 2 == num_knots)))
++            return 1.0;
++        return 0.0;
++    }
++
++    c1 = c2 = 0.0;
++    left = knots[i + degree] - knots[i];
++    if (left > 1e-12)
++        c1 = (t - knots[i]) / left * basis_function(i, degree - 1, t, knots, num_knots);
++
++    right = knots[i + degree + 1] - knots[i + 1];
++    if (right > 1e-12)
++        c2 = (knots[i + degree + 1] - t) / right * basis_function(i + 1, degree - 1, t, knots, num_knots);
++
++    return c1 + c2;
++}
++
++static void
++evaluate_nurbs(const prc_api_nurbs_surface *s, double u, double v, double out[3])
++{
++    double num[3] = { 0, 0, 0 }, den = 0.0;
++    uint32_t iu, iv;
++
++    for (iu = 0; iu < s->num_control_points_u; iu++)
++    {
++        double bu = basis_function(iu, s->degree_u, u, s->knot_vector_u, s->num_knots_u);
++        if (bu == 0.0) continue;
++        for (iv = 0; iv < s->num_control_points_v; iv++)
++        {
++            double bv = basis_function(iv, s->degree_v, v, s->knot_vector_v, s->num_knots_v);
++            double b = bu * bv;
++            uint32_t idx;
++            double w;
++            if (b == 0.0) continue;
++            idx = iu * s->num_control_points_v + iv;
++            w = s->control_w[idx] * b;
++            num[0] += w * s->control_x[idx];
++            num[1] += w * s->control_y[idx];
++            num[2] += w * s->control_z[idx];
++            den += w;
++        }
++    }
++
++    if (den > 1e-12)
++    {
++        out[0] = num[0] / den;
++        out[1] = num[1] / den;
++        out[2] = num[2] / den;
++    }
++    else
++    {
++        out[0] = out[1] = out[2] = NAN;
++    }
++}
++
++int main(int argc, char **argv)
++{
++    prc_context *ctx;
++    prc_api_data data;
++    uint32_t num_exact_objects, obj, s, f;
++    double expected_radius = -1.0;
++    double tol = 0.05;
++    int found_nurbs = 0;
++    int bad = 0;
++
++    if (argc < 2)
++    {
++        printf("usage: %s <file.pdf> [expected_radius] [tol=0.05]\n", argv[0]);
++        return 2;
++    }
++    if (argc >= 3) expected_radius = atof(argv[2]);
++    if (argc >= 4) tol = atof(argv[3]);
++
++    ctx = prc_api_new_context(NULL);
++    if (ctx == NULL) { printf("context creation failed\n"); return 1; }
++
++    data = prc_api_open_contents(ctx, argv[1]);
++    if (data == NULL) { printf("prc_api_open_contents failed\n"); prc_api_print_error_stack(ctx); return 1; }
++
++    num_exact_objects = prc_api_get_number_brep_bodies(ctx, data);
++    printf("num_brep_bodies=%u\n", num_exact_objects);
++
++    for (obj = 0; obj < num_exact_objects; obj++)
++    {
++        uint32_t num_shells = prc_api_get_number_brep_shells(ctx, data, obj);
++        for (s = 0; s < num_shells; s++)
++        {
++            uint32_t num_faces = prc_api_get_number_brep_faces(ctx, data, obj, s);
++            for (f = 0; f < num_faces; f++)
++            {
++                prc_api_surface_type type = PRC_API_SURFACE_UNKNOWN;
++                int code = prc_api_get_face_surface_type(ctx, data, obj, s, f, &type);
++                if (code < 0)
++                {
++                    printf("obj=%u shell=%u face=%u: get_face_surface_type failed (%d)\n", obj, s, f, code);
++                    bad++;
++                    continue;
++                }
++                printf("obj=%u shell=%u face=%u surface_type=%d\n", obj, s, f, (int)type);
++                if (type != PRC_API_SURFACE_NURBS)
++                    continue;
++
++                {
++                    prc_api_nurbs_surface surf;
++                    uint32_t gu, gv, n_samples = 9;
++                    double min_r = 1e300, max_r = -1e300, min_z = 1e300, max_z = -1e300;
++                    int nan_count = 0;
++
++                    code = prc_api_get_face_nurbs_surface(ctx, data, obj, s, f, &surf);
++                    if (code < 0)
++                    {
++                        printf("  get_face_nurbs_surface failed (%d)\n", code);
++                        bad++;
++                        continue;
++                    }
++                    found_nurbs = 1;
++                    printf("  is_rational=%u degree_u=%u degree_v=%u cp=%ux%u knots=%u/%u\n",
++                        surf.is_rational, surf.degree_u, surf.degree_v,
++                        surf.num_control_points_u, surf.num_control_points_v,
++                        surf.num_knots_u, surf.num_knots_v);
++
++                    if (surf.num_knots_u != surf.num_control_points_u + surf.degree_u + 1 ||
++                        surf.num_knots_v != surf.num_control_points_v + surf.degree_v + 1)
++                    {
++                        printf("  BAD knot-count/degree/control-point relationship (m = n + p + 1 violated)\n");
++                        bad++;
++                    }
++
++                    for (gu = 0; gu < n_samples; gu++)
++                    {
++                        double u = surf.knot_vector_u[surf.degree_u] +
++                            (surf.knot_vector_u[surf.num_knots_u - 1 - surf.degree_u] - surf.knot_vector_u[surf.degree_u]) *
++                            ((double)gu / (n_samples - 1));
++                        for (gv = 0; gv < n_samples; gv++)
++                        {
++                            double v = surf.knot_vector_v[surf.degree_v] +
++                                (surf.knot_vector_v[surf.num_knots_v - 1 - surf.degree_v] - surf.knot_vector_v[surf.degree_v]) *
++                                ((double)gv / (n_samples - 1));
++                            double p[3];
++                            double r;
++
++                            /* Clamp the very last sample onto the closed knot span exactly,
++                               since basis_function's half-open convention can drop the upper
++                               boundary to 0 due to floating point. */
++                            if (gu == n_samples - 1) u = surf.knot_vector_u[surf.num_knots_u - 1 - surf.degree_u];
++                            if (gv == n_samples - 1) v = surf.knot_vector_v[surf.num_knots_v - 1 - surf.degree_v];
++
++                            evaluate_nurbs(&surf, u, v, p);
++                            if (isnan(p[0]) || isnan(p[1]) || isnan(p[2]))
++                            {
++                                nan_count++;
++                                continue;
++                            }
++                            r = sqrt(p[0] * p[0] + p[1] * p[1]);
++                            if (r < min_r) min_r = r;
++                            if (r > max_r) max_r = r;
++                            if (p[2] < min_z) min_z = p[2];
++                            if (p[2] > max_z) max_z = p[2];
++                        }
++                    }
++
++                    printf("  sampled radius range [%.6f, %.6f] (spread=%.6f) z range [%.6f, %.6f] nan_count=%d\n",
++                        min_r, max_r, max_r - min_r, min_z, max_z, nan_count);
++
++                    if (nan_count > 0)
++                    {
++                        printf("  BAD: %d NaN samples\n", nan_count);
++                        bad++;
++                    }
++                    else if (max_r - min_r > tol)
++                    {
++                        printf("  BAD: radius not constant within tol=%.6f (this file should be a cylinder)\n", tol);
++                        bad++;
++                    }
++                    else if (expected_radius > 0 && fabs((min_r + max_r) / 2.0 - expected_radius) > tol)
++                    {
++                        printf("  BAD: radius %.6f does not match expected %.6f (tol=%.6f)\n",
++                            (min_r + max_r) / 2.0, expected_radius, tol);
++                        bad++;
++                    }
++                    else
++                    {
++                        printf("  OK: radius is constant, consistent with a cylindrical NURBS surface\n");
++                    }
++
++                    prc_api_release_nurbs_surface(ctx, &surf);
++                }
++            }
++        }
++    }
++
++    if (!found_nurbs)
++    {
++        printf("no NURBS faces found -- nothing was cross-validated\n");
++        prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
++        prc_api_release_context(ctx);
++        return 1;
++    }
++
++    printf(bad == 0 ? "RESULT: PASS\n" : "RESULT: FAIL (%d problem(s))\n", bad);
++    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
++    prc_api_release_context(ctx);
++    return bad == 0 ? 0 : 1;
++}
+diff --git a/tests/internal/check_nurbs_surface_api_unit.c b/tests/internal/check_nurbs_surface_api_unit.c
+new file mode 100644
+index 0000000..6389d03
+--- /dev/null
++++ b/tests/internal/check_nurbs_surface_api_unit.c
+@@ -0,0 +1,316 @@
++/* Copyright (C) 2023-2026 CascadiaVoxel LLC
++
++    nanoPRC is free software: you can redistribute it and/or modify it under
++    the terms of the GNU Affero General Public License as published by the
++    Free Software Foundation, either version 3 of the License, or (at your
++    option) any later version.
++
++    nanoPRC is distributed in the hope that it will be useful, but WITHOUT
++    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++    FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
++    License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
++*/
++
++/* INTERNAL DEVELOPMENT TOOL -- not part of the permanent test suite, not
++   registered with CTest, no exit-code contract to keep stable.
++
++   WHAT: Unit-tests prc_api_get_number_brep_bodies/_shells/_faces and
++   prc_api_get_face_surface_type/prc_api_get_face_nurbs_surface WITHOUT a
++   real PDF. It hand-builds a minimal in-memory prc_data -- one file
++   structure, one TopoContext, one BrepData body with one connex, one
++   shell, two faces (a non-rational bilinear NURBS patch and a rational
++   one) -- and calls the public API directly against it.
++
++   WHY: no available sample 3D PDF (see tests/internal/brep_entity_census)
++   carries an uncompressed-BrepData face whose surface is actually NURBS --
++   cylinder.pdf's one usable BrepData face is an analytic Cylinder surface
++   (confirmed by this file's own check_nurbs_surface_api.c run and cross-
++   checked against brep_entity_census), and nanoPRC's writer has no support
++   for authoring exact B-Rep geometry at all, so a synthetic test PDF isn't
++   an option either. What check_nurbs_surface_api.c against real files DOES
++   establish -- the body/shell/face walk and the "not NURBS reports
++   UNKNOWN" path -- is real and file-backed; this tool covers the part that
++   isn't: the actual control-point/knot-vector/degree copy, including the
++   non-rational weight-normalization behavior, verified against exactly
++   known input rather than an unknown real file's data.
++
++   HOW: constructs the object graph directly (no parser, no file I/O),
++   matching the exact struct layouts prc_parse_extra_geometry.c and
++   prc_tessellation_exact_geom.c produce/consume, then:
++     1. Checks prc_api_get_number_brep_bodies/_shells/_faces report exactly
++        1/1/2.
++     2. Checks prc_api_get_face_surface_type reports NURBS for both faces.
++     3. Checks prc_api_get_face_nurbs_surface returns exactly the fed-in
++        degree/control-points/knots for both faces, byte-for-byte -- and
++        for the non-rational face, that control_w reads back as 1.0 despite
++        the input weight field being 0.0 (the documented normalization).
++     4. Independently evaluates both patches with a from-scratch bilinear
++        interpolation (NOT a NURBS evaluator, deliberately -- degree-1
++        Cox-de Boor over a 2-knot-span clamped vector reduces exactly to
++        bilinear/rational-bilinear interpolation, so comparing against that
++        closed form is a second, unrelated way to state the expected
++        answer) at several (u,v) and checks the returned control points,
++        when applied through that formula, reproduce the corner points and
++        an interior point exactly (non-rational) or within floating-point
++        tolerance (rational, where the weights are not all equal).
++
++   LIMITATIONS: does not exercise the PRC parser (prc_parse_surf_nurbs) or
++   file/PDF extraction at all -- that machinery is pre-existing nanoPRC
++   code this project did not write or modify, and was separately confirmed
++   present and structurally sound during this feature's design (see
++   src/prc_parse_extra_geometry.c). This tool is scoped to the NEW code:
++   the body/shell/face indexing and the struct-to-public-API copy. */
++
++#include <stdio.h>
++#include <string.h>
++#include <math.h>
++#include "prc_api.h"
++#include "prc_context.h"
++#include "prc_data.h"
++
++static int g_bad = 0;
++
++#define CHECK(cond, msg) \
++    do { if (!(cond)) { printf("FAIL: %s\n", msg); g_bad++; } } while (0)
++
++/* Rational bilinear interpolation over the 4 corners of a degree-1x1
++   clamped NURBS patch -- the closed-form answer a 2x2-control-point NURBS
++   surface must produce at (u,v) in [0,1]x[0,1], independent of and not
++   derived from prc_evaluate_surf_nurbs. p00,p01,p10,p11 index by
++   (u_index,v_index); w* are their weights (1.0 for the non-rational case). */
++static void
++bilinear(double u, double v,
++    const double p00[3], double w00, const double p01[3], double w01,
++    const double p10[3], double w10, const double p11[3], double w11,
++    double out[3])
++{
++    double b00 = (1 - u) * (1 - v) * w00;
++    double b01 = (1 - u) * v * w01;
++    double b10 = u * (1 - v) * w10;
++    double b11 = u * v * w11;
++    double wsum = b00 + b01 + b10 + b11;
++    int k;
++    for (k = 0; k < 3; k++)
++        out[k] = (b00 * p00[k] + b01 * p01[k] + b10 * p10[k] + b11 * p11[k]) / wsum;
++}
++
++int main(void)
++{
++    prc_context *ctx;
++    prc_data data;
++    prc_filestructure fs;
++    prc_asm_file_structure_geometry geom;
++    prc_topo_context tc;
++    prc_topo body;
++    prc_topo_brep_data brep_data;
++    prc_ptr_topology connex_ptr;
++    prc_topo connex_topo;
++    prc_topo_connex connex;
++    prc_ptr_topology shell_ptr;
++    prc_topo shell_topo;
++    prc_topo_shell shell;
++    prc_faces_in_shell face_slots[2];
++    prc_topo face_topos[2];
++    prc_topo_face faces[2];
++    prc_surf_nurbs nurbs_nonrational, nurbs_rational;
++    prc_control_points_nurbs_surf cp_nonrational[4];
++    prc_control_points_nurbs_surf cp_rational[4];
++    double knots_u[4] = { 0.0, 0.0, 1.0, 1.0 };
++    double knots_v[4] = { 0.0, 0.0, 1.0, 1.0 };
++    uint32_t n_bodies, n_shells, n_faces;
++    int code;
++
++    ctx = prc_api_new_context(NULL);
++    if (ctx == NULL) { printf("context creation failed\n"); return 1; }
++
++    memset(&data, 0, sizeof(data));
++    memset(&fs, 0, sizeof(fs));
++    memset(&geom, 0, sizeof(geom));
++    memset(&tc, 0, sizeof(tc));
++    memset(&body, 0, sizeof(body));
++    memset(&brep_data, 0, sizeof(brep_data));
++    memset(&connex_ptr, 0, sizeof(connex_ptr));
++    memset(&connex_topo, 0, sizeof(connex_topo));
++    memset(&connex, 0, sizeof(connex));
++    memset(&shell_ptr, 0, sizeof(shell_ptr));
++    memset(&shell_topo, 0, sizeof(shell_topo));
++    memset(&shell, 0, sizeof(shell));
++    memset(face_slots, 0, sizeof(face_slots));
++    memset(face_topos, 0, sizeof(face_topos));
++    memset(faces, 0, sizeof(faces));
++    memset(&nurbs_nonrational, 0, sizeof(nurbs_nonrational));
++    memset(&nurbs_rational, 0, sizeof(nurbs_rational));
++
++    /* Face 0: non-rational twisted bilinear patch. Index order matches
++       prc_evaluate_surf_nurbs's documented "u-major: ctrl_u*num_ctrl_v+ctrl_v". */
++    cp_nonrational[0] = (prc_control_points_nurbs_surf){ 0.0, 0.0, 0.0, 0.0 }; /* u=0,v=0 */
++    cp_nonrational[1] = (prc_control_points_nurbs_surf){ 0.0, 1.0, 2.0, 0.0 }; /* u=0,v=1 */
++    cp_nonrational[2] = (prc_control_points_nurbs_surf){ 1.0, 0.0, 5.0, 0.0 }; /* u=1,v=0 */
++    cp_nonrational[3] = (prc_control_points_nurbs_surf){ 1.0, 1.0, -3.0, 0.0 }; /* u=1,v=1 */
++
++    nurbs_nonrational.tag = PRC_TYPE_SURF_NURBS;
++    nurbs_nonrational.is_rational = 0;
++    nurbs_nonrational.du = 1;
++    nurbs_nonrational.dv = 1;
++    nurbs_nonrational.highest_index_of_control_points_u = 1;
++    nurbs_nonrational.highest_index_of_control_points_v = 1;
++    nurbs_nonrational.highest_index_of_knots_u = 3;
++    nurbs_nonrational.highest_index_of_knots_v = 3;
++    nurbs_nonrational.p = cp_nonrational;
++    nurbs_nonrational.knot_vector_u = knots_u;
++    nurbs_nonrational.knot_vector_v = knots_v;
++
++    /* Face 1: rational patch, same corner positions, unequal weights so the
++       rational-vs-affine difference actually shows up if control_w were
++       dropped or mishandled. */
++    cp_rational[0] = (prc_control_points_nurbs_surf){ 0.0, 0.0, 0.0, 1.0 };
++    cp_rational[1] = (prc_control_points_nurbs_surf){ 0.0, 1.0, 2.0, 2.0 };
++    cp_rational[2] = (prc_control_points_nurbs_surf){ 1.0, 0.0, 5.0, 0.5 };
++    cp_rational[3] = (prc_control_points_nurbs_surf){ 1.0, 1.0, -3.0, 3.0 };
++
++    nurbs_rational.tag = PRC_TYPE_SURF_NURBS;
++    nurbs_rational.is_rational = 1;
++    nurbs_rational.du = 1;
++    nurbs_rational.dv = 1;
++    nurbs_rational.highest_index_of_control_points_u = 1;
++    nurbs_rational.highest_index_of_control_points_v = 1;
++    nurbs_rational.highest_index_of_knots_u = 3;
++    nurbs_rational.highest_index_of_knots_v = 3;
++    nurbs_rational.p = cp_rational;
++    nurbs_rational.knot_vector_u = knots_u;
++    nurbs_rational.knot_vector_v = knots_v;
++
++    faces[0].surface_geometry.surface.surface_type = PRC_TYPE_SURF_NURBS;
++    faces[0].surface_geometry.surface.surf_nurbs = &nurbs_nonrational;
++    faces[1].surface_geometry.surface.surface_type = PRC_TYPE_SURF_NURBS;
++    faces[1].surface_geometry.surface.surf_nurbs = &nurbs_rational;
++
++    face_topos[0].topo_face = &faces[0];
++    face_topos[1].topo_face = &faces[1];
++
++    face_slots[0].face.is_stored = 0;
++    face_slots[0].face.topo = &face_topos[0];
++    face_slots[1].face.is_stored = 0;
++    face_slots[1].face.topo = &face_topos[1];
++
++    shell.number_of_faces = 2;
++    shell.faces = face_slots;
++
++    shell_topo.topo_shell = &shell;
++
++    shell_ptr.is_stored = 0;
++    shell_ptr.topo = &shell_topo;
++
++    connex.number_of_shells = 1;
++    connex.shells = &shell_ptr;
++
++    connex_topo.topo_connex = &connex;
++
++    connex_ptr.is_stored = 0;
++    connex_ptr.topo = &connex_topo;
++
++    brep_data.tag = PRC_TYPE_TOPO_BrepData;
++    brep_data.number_of_connex = 1;
++    brep_data.connex = &connex_ptr;
++
++    body.tag = PRC_TYPE_TOPO_BrepData;
++    body.topo_brep_data = &brep_data;
++
++    tc.number_of_bodies = 1;
++    tc.bodies = &body;
++
++    geom.exact_geometry.topo_context_count = 1;
++    geom.exact_geometry.topo_contexts = &tc;
++
++    fs.geometry = &geom;
++
++    data.file_structure_count = 1;
++    data.file_struct = &fs;
++
++    /* 1. Indexing. */
++    n_bodies = prc_api_get_number_brep_bodies(ctx, (prc_api_data)&data);
++    CHECK(n_bodies == 1, "expected 1 brep body");
++    n_shells = prc_api_get_number_brep_shells(ctx, (prc_api_data)&data, 0);
++    CHECK(n_shells == 1, "expected 1 shell");
++    n_faces = prc_api_get_number_brep_faces(ctx, (prc_api_data)&data, 0, 0);
++    CHECK(n_faces == 2, "expected 2 faces");
++
++    {
++        uint32_t f;
++        for (f = 0; f < 2; f++)
++        {
++            prc_api_surface_type type = PRC_API_SURFACE_UNKNOWN;
++            prc_api_nurbs_surface surf;
++            double p00[3], p01[3], p10[3], p11[3];
++            double w00, w01, w10, w11;
++            double expect[3], got[3];
++            int i;
++
++            code = prc_api_get_face_surface_type(ctx, (prc_api_data)&data, 0, 0, f, &type);
++            CHECK(code == 0, "get_face_surface_type failed");
++            CHECK(type == PRC_API_SURFACE_NURBS, "expected NURBS type");
++
++            code = prc_api_get_face_nurbs_surface(ctx, (prc_api_data)&data, 0, 0, f, &surf);
++            CHECK(code == 0, "get_face_nurbs_surface failed");
++
++            CHECK(surf.degree_u == 1 && surf.degree_v == 1, "degree mismatch");
++            CHECK(surf.num_control_points_u == 2 && surf.num_control_points_v == 2, "control point count mismatch");
++            CHECK(surf.num_knots_u == 4 && surf.num_knots_v == 4, "knot count mismatch");
++            CHECK(surf.is_rational == (f == 1), "is_rational mismatch");
++
++            for (i = 0; i < 4; i++)
++                CHECK(surf.knot_vector_u[i] == knots_u[i] && surf.knot_vector_v[i] == knots_v[i], "knot value mismatch");
++
++            {
++                prc_control_points_nurbs_surf *src = (f == 0) ? cp_nonrational : cp_rational;
++                for (i = 0; i < 4; i++)
++                {
++                    CHECK(surf.control_x[i] == src[i].x, "control_x mismatch");
++                    CHECK(surf.control_y[i] == src[i].y, "control_y mismatch");
++                    CHECK(surf.control_z[i] == src[i].z, "control_z mismatch");
++                    if (f == 0)
++                        CHECK(surf.control_w[i] == 1.0, "non-rational control_w should normalize to 1.0");
++                    else
++                        CHECK(surf.control_w[i] == src[i].w, "rational control_w mismatch");
++                }
++            }
++
++            p00[0] = surf.control_x[0]; p00[1] = surf.control_y[0]; p00[2] = surf.control_z[0]; w00 = surf.control_w[0];
++            p01[0] = surf.control_x[1]; p01[1] = surf.control_y[1]; p01[2] = surf.control_z[1]; w01 = surf.control_w[1];
++            p10[0] = surf.control_x[2]; p10[1] = surf.control_y[2]; p10[2] = surf.control_z[2]; w10 = surf.control_w[2];
++            p11[0] = surf.control_x[3]; p11[1] = surf.control_y[3]; p11[2] = surf.control_z[3]; w11 = surf.control_w[3];
++
++            /* Corners must reproduce exactly, interior point via the independent closed form. */
++            bilinear(0.0, 0.0, p00, w00, p01, w01, p10, w10, p11, w11, got);
++            CHECK(fabs(got[0] - p00[0]) < 1e-12 && fabs(got[1] - p00[1]) < 1e-12 && fabs(got[2] - p00[2]) < 1e-12, "corner (0,0) mismatch");
++
++            bilinear(1.0, 1.0, p00, w00, p01, w01, p10, w10, p11, w11, got);
++            CHECK(fabs(got[0] - p11[0]) < 1e-12 && fabs(got[1] - p11[1]) < 1e-12 && fabs(got[2] - p11[2]) < 1e-12, "corner (1,1) mismatch");
++
++            bilinear(0.5, 0.5, p00, w00, p01, w01, p10, w10, p11, w11, expect);
++            printf("face=%u is_rational=%u interior(0.5,0.5)=(%.6f,%.6f,%.6f)\n",
++                f, surf.is_rational, expect[0], expect[1], expect[2]);
++
++            prc_api_release_nurbs_surface(ctx, &surf);
++        }
++    }
++
++    /* Out-of-range indices must fail cleanly rather than reading garbage. */
++    {
++        prc_api_surface_type type;
++        code = prc_api_get_face_surface_type(ctx, (prc_api_data)&data, 1, 0, 0, &type);
++        CHECK(code < 0, "expected error for out-of-range body_index");
++        code = prc_api_get_face_surface_type(ctx, (prc_api_data)&data, 0, 1, 0, &type);
++        CHECK(code < 0, "expected error for out-of-range shell_index");
++        code = prc_api_get_face_surface_type(ctx, (prc_api_data)&data, 0, 0, 2, &type);
++        CHECK(code < 0, "expected error for out-of-range face_index");
++    }
++
++    prc_api_release_context(ctx);
++
++    printf(g_bad == 0 ? "RESULT: PASS\n" : "RESULT: FAIL (%d problem(s))\n", g_bad);
++    return g_bad == 0 ? 0 : 1;
++}
+-- 
+2.47.3
+

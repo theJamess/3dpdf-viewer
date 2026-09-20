@@ -31,6 +31,15 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
     already-installed SDL3 before compiling the vendored copy from source
     (README.md's "Setup" section), touching `CMakeLists.txt` and
     `thirdparty/CMakeLists.txt`.
+  - `patches/0005-expose-brep-nurbs-surface-data.patch` adds a library API
+    (`prc_api_get_number_brep_bodies`/`_shells`/`_faces`,
+    `prc_api_get_face_surface_type`, `prc_api_get_face_nurbs_surface`,
+    `prc_api_release_nurbs_surface` in `include/prc_api.h` and
+    `src/prc_tri_primitives_api.c`) for reading a face's exact NURBS
+    surface data (degree, control points, knot vectors), plus two new
+    internal test tools under `tests/internal/`. Not wired into the
+    viewer UI; see README.md's "Patches" section for its significant
+    scope limitation (uncompressed B-Rep bodies only).
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,

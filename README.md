@@ -123,6 +123,30 @@ licensing.
   SDL3 (`find_package`) before compiling the vendored copy from source,
   cutting a from-scratch `scripts/setup.sh` run from a couple of minutes
   to well under one on systems that have `libsdl3-dev`. See "Setup" above.
+- `patches/0005-expose-brep-nurbs-surface-data.patch` — adds a *library*
+  API (`prc_api_get_number_brep_bodies`/`_shells`/`_faces`,
+  `prc_api_get_face_surface_type`, `prc_api_get_face_nurbs_surface`) that
+  lets code built on nanoPRC read a face's exact NURBS surface (degree,
+  control points, knot vectors) instead of only its tessellated triangles.
+  This is not wired into `nano_prc_viewer`'s UI — nothing changes for the
+  viewer as shipped here. **Known, significant limitation:** it only works
+  for PRC's *uncompressed* B-Rep body encoding, which is the minority
+  encoding in real-world CAD-authored 3D PDFs (most use the *compressed*
+  encoding, which stores geometry in a form this patch doesn't decode —
+  see the patch's own commit message and the doc comments in
+  `prc_api_get_face_surface_type` for the full detail). Concretely: of
+  this project's own 7 test files (the 3 bundled examples plus 4 real
+  assemblies), none exposes an addressable NURBS face through this API —
+  one file's only uncompressed body is an analytic Cylinder surface (a
+  different, non-NURBS case this API also reports correctly), and the
+  rest have no addressable uncompressed bodies at all. The extraction
+  logic itself is verified correct (`tests/internal/check_nurbs_surface_api_unit.c`,
+  a hand-built in-memory test against known input, since no available
+  sample file exercises it), but if you're hoping this unlocks exact
+  measurement on your own 3D PDFs, check with
+  `tests/internal/brep_entity_census` first — it reports BrepData vs.
+  BrepDataCompress per file so you know ahead of time whether a given file
+  is in scope.
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 
