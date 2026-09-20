@@ -97,6 +97,15 @@ under **Scene**. "Reset View" and "Save Screenshot" are also available as
 buttons there (Camera and Main tabs) for anyone who'd rather click than
 memorize keys.
 
+**Known no-op: "Enable Auto Motion" (Main tab).** This checkbox does
+nothing — it's upstream nanoPRC code, unmodified by this project. The
+variable it toggles is never read anywhere in the render or update loop,
+and more fundamentally, nanoPRC's PRC parser has no animation/kinematic
+data model at all to drive it (nothing in the format's parsed structures
+represents motion), so there's no real content this could animate even if
+it were wired up. Left as-is rather than silently hidden, so it's at least
+honestly documented instead of a mystery.
+
 **Cross-section**: the **Section** tab cuts the model away on one side of a
 plane (pick an axis, slide the offset, optionally flip which side is kept)
 — useful for looking inside an enclosure without hiding parts one at a time.
