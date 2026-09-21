@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **File > Import from STEP** menu item (`patches/0008`): converts a STEP
+  (ISO 10303) file to a 3D PDF and opens it, via a new OpenCASCADE bridge
+  into nanoPRC's existing PRC write API. Geometry only — does not carry
+  over STEP assembly names/hierarchy, colors, or PMI (see the README's
+  "Controls" section for the full scope note). Best-effort dependency:
+  `scripts/setup.sh` and `scripts/build-deb.sh` both install OpenCASCADE
+  when available and degrade to a clear "not available" dialog (instead
+  of failing the whole build) when it isn't.
+
 ## [0.1.0] - 2026-09-21
 
 First tagged release.

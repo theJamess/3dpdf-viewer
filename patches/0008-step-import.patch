@@ -1,0 +1,797 @@
+From 8fd29c958df18544630e3daee747b93a4056a753 Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Mon, 21 Sep 2026 13:18:53 -0500
+Subject: [PATCH] Add File > Import from STEP to the viewer, bridging
+ OpenCASCADE into nanoPRC's write API
+
+Lets the viewer open a STEP (ISO 10303) file directly: reads and
+tessellates it with OpenCASCADE (OCCT), then writes the result out
+through nanoPRC's own prc_api_write_prc_buffer + prc_api_pdf_embed_prc
+(unmodified, pre-existing API -- this patch is pure integration, no
+changes to nanoPRC's write path itself) as a real 3D PDF, which the
+viewer then loads normally.
+
+SCOPE: geometry only. Every solid in the file becomes its own PRC part
+(so the Scene panel's part tree stays useful on a real assembly), but
+STEP's own product/assembly names and hierarchy are not preserved
+(parts are named "Solid N"), and neither are colors/materials/PMI --
+nanoPRC's write API has no parameters for any of that to flow through
+even if extracted. This is a geometry importer, not a STEP-to-3D-PDF
+archival tool.
+
+Implementation:
+- demos/viewer/src/step_import.{h,cpp}: the real bridge, built only
+  when OpenCASCADE is found. Reads via STEPControl_Reader, tessellates
+  via BRepMesh_IncrementalMesh, then for each TopAbs_SOLID (falling
+  back to the whole shape if the file has no explicit SOLID wrapper)
+  flattens its faces' triangulations into one nanoPRC tessellation
+  entry -- applying each face's own TopLoc_Location (STEP assemblies
+  place shared/instanced shapes via a transform on the reference, not
+  by duplicating geometry -- skipping this would stack every instance
+  at the same spot) and fixing triangle winding for TopAbs_REVERSED
+  faces (needed for correct flat-shaded normals under nanoPRC's
+  recalculated-normals path; half the model's faces point inward
+  without this).
+- demos/viewer/src/step_import_stub.cpp: built instead when
+  OpenCASCADE isn't found, so the menu item and its call sites in
+  main.cpp are unconditional -- absence only surfaces as a clear
+  runtime message when actually invoked, not a vanished menu item or a
+  failed build.
+- CMakeLists.txt / demos/viewer/CMakeLists.txt: find_package(OpenCASCADE
+  QUIET CONFIG) at top-level scope (same reasoning as the existing SDL3
+  find_package -- demos/viewer needs the imported targets, and it's a
+  sibling of thirdparty/, not a child), best-effort like every other
+  optional dependency in this project; link only the specific OCCT
+  modules actually used (STEP read, tessellation, basic topology), not
+  the full module list find_package(OpenCASCADE) exposes.
+- main.cpp: a plain ImGui main menu bar (File > Import from STEP...),
+  a zenity file picker and error dialog run via fork+execvp (never a
+  shell -- no injection concern regardless of what ends up in a picked
+  path or error string), and process relaunch via execv(/proc/self/exe,
+  ...) with the converted PDF as the new argument on success.
+  Deliberately NOT a hot-reload of the running Scene: Scene::load() was
+  written as a one-shot startup path that calls exit(1) on any internal
+  failure (see scene.cpp), so making it safely re-enterable would mean
+  auditing and rewriting every one of those failure paths -- relaunching
+  reuses that exact, already-proven startup path instead of adding a
+  second, less-tested one. The menu bar's own hover state is folded into
+  the existing mouse_over_debug gate (same mechanism debugMenu() already
+  uses) so opening File doesn't also start an arcball drag on the model
+  underneath it.
+
+Verified end-to-end, repeatedly, against a real file (Onshape STEP
+export, 12 solids, 897 faces): a standalone bridge prototype first (STEP
+parse 0.9s, tessellate 0.2s, nanoPRC write ~0.1s), confirmed correct via
+scan_prc + a rendered screenshot; then the per-solid-split version
+(scan_prc: parts=24 tess=12, one tessellation per solid) via the same
+checks; then the full in-viewer flow interactively under Xvfb --
+launched the viewer, opened File > Import from STEP, picked the real
+file through the actual zenity dialog, watched it convert and the
+process relaunch itself (confirmed via the new command line:
+nano_prc_viewer /tmp/3dpdf-viewer-import-*.pdf), and confirmed the
+model rendered correctly.
+
+A real bug was found and fixed during this work, in the integration
+code, not nanoPRC: prc_api_write_tessellation.num_positions is a VERTEX
+count (nanoPRC's own prc_encode_preprocess_ex multiplies it by 3
+internally), but its doc comment only says "3 doubles per vertex"
+without stating that unit for num_positions itself -- passing the
+doubles count instead segfaulted the compressed-tessellation encoder
+(an out-of-bounds read in its own bbox-computation loop) on a real
+36k-vertex mesh. Not a nanoPRC bug, but worth another engineer's eyes
+if they hit the same misreading.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                        |  18 ++
+ demos/viewer/CMakeLists.txt           |  25 +++
+ demos/viewer/src/main.cpp             | 171 ++++++++++++++-
+ demos/viewer/src/step_import.cpp      | 297 ++++++++++++++++++++++++++
+ demos/viewer/src/step_import.h        |  53 +++++
+ demos/viewer/src/step_import_stub.cpp |  36 ++++
+ 6 files changed, 599 insertions(+), 1 deletion(-)
+ create mode 100644 demos/viewer/src/step_import.cpp
+ create mode 100644 demos/viewer/src/step_import.h
+ create mode 100644 demos/viewer/src/step_import_stub.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index caea610..4571f87 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -38,11 +38,29 @@ option(NANOPRC_BUILD_TESTS "Build nanoPRC tests" ON)
+ option(NANOPRC_BUILD_SDL "Build SDL dependency (needed for viewer demos)" ON)
+ option(NANOPRC_USE_SYSTEM_SDL "Prefer an already-installed SDL3 over building the vendored copy from source" ON)
+ option(NANOPRC_ENABLE_WINDOWS_GAMEINPUT "Enable SDL GameInput integration on Windows (requires gameinput.h)" OFF)
++option(NANOPRC_ENABLE_STEP_IMPORT "Enable the viewer's File > Import from STEP menu item (requires OpenCASCADE; best-effort -- silently disabled if not found, not a hard error)" ON)
+ 
+ if (NANOPRC_BUILD_DEMOS AND NOT NANOPRC_BUILD_SDL)
+ 	message(FATAL_ERROR "NANOPRC_BUILD_DEMOS=ON requires NANOPRC_BUILD_SDL=ON")
+ endif()
+ 
++# Same top-level-scope reasoning as the SDL3 find_package below: demos/viewer
++# needs to see the imported targets, and it's a sibling of thirdparty/, not
++# a child. Best-effort like the rest of this project's optional deps (see
++# NANOPRC_USE_SYSTEM_SDL's own fallback) -- OpenCASCADE not being present
++# just means step_import_stub.cpp gets built instead of step_import.cpp
++# (demos/viewer/CMakeLists.txt decides which), not a build failure.
++set(NANOPRC_OCCT_FOUND FALSE)
++if (NANOPRC_BUILD_DEMOS AND NANOPRC_ENABLE_STEP_IMPORT)
++	find_package(OpenCASCADE QUIET CONFIG)
++	if (OpenCASCADE_FOUND)
++		set(NANOPRC_OCCT_FOUND TRUE)
++		message(STATUS "nanoPRC: found OpenCASCADE (${OpenCASCADE_INCLUDE_DIR}) -- viewer's STEP import will be enabled")
++	else()
++		message(STATUS "nanoPRC: OpenCASCADE not found -- viewer's File > Import from STEP will report unavailable at runtime (install libocct-data-exchange-dev to enable)")
++	endif()
++endif()
++
+ # Must run at this (top-level) scope, not inside thirdparty/'s subdirectory:
+ # find_package's imported targets are only visible in the directory scope
+ # that called it and that scope's children, and demos/viewer (added below,
+diff --git a/demos/viewer/CMakeLists.txt b/demos/viewer/CMakeLists.txt
+index fa1b60c..b121c44 100644
+--- a/demos/viewer/CMakeLists.txt
++++ b/demos/viewer/CMakeLists.txt
+@@ -3,6 +3,18 @@ project(nano_prc_viewer)
+ 
+ set(CMAKE_CXX_STANDARD 14)
+ 
++# See the top-level CMakeLists.txt for how NANOPRC_OCCT_FOUND is
++# determined -- step_import.cpp (real STEP import, needs OpenCASCADE) vs
++# step_import_stub.cpp (always-fails-with-a-clear-message placeholder) are
++# mutually exclusive alternate implementations of demos/viewer/src/step_
++# import.h, never both compiled, so main.cpp's call sites don't need to
++# know or care which one they got.
++if (NANOPRC_OCCT_FOUND)
++	set(NANOPRC_STEP_IMPORT_SRC src/step_import.cpp)
++else()
++	set(NANOPRC_STEP_IMPORT_SRC src/step_import_stub.cpp)
++endif()
++
+ add_executable(nano_prc_viewer
+ 	src/bloom.cpp
+ 	src/camera.cpp
+@@ -18,6 +30,7 @@ add_executable(nano_prc_viewer
+ 	src/texture.cpp
+ 	src/text.cpp
+ 	src/graphics2d.cpp
++	${NANOPRC_STEP_IMPORT_SRC}
+     glad/src/glad.c
+ 	../../thirdparty/imgui/imgui.cpp
+ 	../../thirdparty/imgui/imgui_draw.cpp
+@@ -29,6 +42,18 @@ add_executable(nano_prc_viewer
+ target_link_libraries(nano_prc_viewer PRIVATE nano_prc)
+ target_link_libraries(nano_prc_viewer PRIVATE SDL3::SDL3)
+ 
++if (NANOPRC_OCCT_FOUND)
++	target_include_directories(nano_prc_viewer PRIVATE ${OpenCASCADE_INCLUDE_DIR})
++	# Only the specific modules step_import.cpp actually uses (STEP read,
++	# tessellation, basic geometry/topology) -- not the full
++	# ${OpenCASCADE_LIBRARIES} list (which includes visualization, OCAF,
++	# every other DE format's import/export, and DRAW/test modules this
++	# viewer has no use for).
++	target_link_libraries(nano_prc_viewer PRIVATE
++		TKDESTEP TKXCAF TKXSBase TKMesh TKTopAlgo TKBRep TKGeomAlgo TKGeomBase
++		TKG3d TKG2d TKMath TKernel TKLCAF TKCAF TKCDF TKV3d TKService TKVCAF)
++endif()
++
+ # Only link the math library if we aren't targeting Windows (MSVC's CRT
+ # bundles sqrt() etc.; glibc requires linking libm explicitly) -- camera.cpp/
+ # scene.cpp call libm functions directly, and MatrixUtil is header-only (no
+diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
+index 88c39bd..113f774 100644
+--- a/demos/viewer/src/main.cpp
++++ b/demos/viewer/src/main.cpp
+@@ -23,6 +23,8 @@
+ #include <cmath>
+ #include <algorithm>
+ #include <ctime>
++#include <string>
++#include <vector>
+ 
+ #include <SDL3/SDL.h>
+ 
+@@ -45,6 +47,10 @@
+ #include "bloom.h"
+ #include "mesh.h"
+ #include "config.h"
++#include "step_import.h"
++
++#include <unistd.h>
++#include <sys/wait.h>
+ 
+ static constexpr int kWindowWidth = 480;
+ static constexpr int kWindowHeight = 360;
+@@ -669,6 +675,158 @@ static void drawControlHintsOverlay(int windowHeight)
+     ImGui::End();
+ }
+ 
++/* Runs an external program with argv, no shell involved (so no quoting/
++   injection concerns regardless of what ends up in argv -- a user-chosen
++   file path, for instance) and captures its stdout. Returns the captured
++   output (trailing newline stripped) on a zero exit status, empty string
++   otherwise (covers both "program not found" and "user cancelled", which
++   is exactly right for both zenity uses below: cancelling the file picker
++   or dismissing the error dialog should look the same as zenity not being
++   installed at all -- nothing more to do). */
++static std::string runCaptureStdout(const std::vector<std::string> &argv)
++{
++    int pipefd[2];
++    if (pipe(pipefd) != 0)
++        return std::string();
++
++    pid_t pid = fork();
++    if (pid < 0)
++    {
++        close(pipefd[0]);
++        close(pipefd[1]);
++        return std::string();
++    }
++
++    if (pid == 0)
++    {
++        /* Child: stdout -> pipe write end, exec. */
++        close(pipefd[0]);
++        dup2(pipefd[1], STDOUT_FILENO);
++        close(pipefd[1]);
++
++        std::vector<char *> cargv;
++        for (const std::string &s : argv)
++            cargv.push_back(const_cast<char *>(s.c_str()));
++        cargv.push_back(nullptr);
++
++        execvp(cargv[0], cargv.data());
++        _exit(127); /* execvp only returns on failure */
++    }
++
++    /* Parent */
++    close(pipefd[1]);
++    std::string output;
++    char buf[256];
++    ssize_t n;
++    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0)
++        output.append(buf, (size_t)n);
++    close(pipefd[0]);
++
++    int status = 0;
++    waitpid(pid, &status, 0);
++
++    while (!output.empty() && (output.back() == '\n' || output.back() == '\r'))
++        output.pop_back();
++
++    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
++        return std::string();
++
++    return output;
++}
++
++static std::string pickStepFileViaZenity()
++{
++    return runCaptureStdout({
++        "zenity", "--file-selection", "--title=Import from STEP",
++        "--file-filter=STEP files | *.step *.stp *.STEP *.STP"
++    });
++}
++
++static void showImportErrorDialog(const std::string &message)
++{
++    runCaptureStdout({ "zenity", "--error", "--title=Import from STEP",
++        "--text=" + message });
++}
++
++/* Set from the File menu; handled once per frame, after rendering (same
++   deferred-to-after-render pattern as g_screenshotRequested below) rather
++   than inline in the menu callback, since a successful import ends the
++   process (see the handler). */
++static bool g_stepImportRequested = false;
++
++/* No hot-reload of an already-running Scene -- Scene::load() calls exit(1)
++   on any internal failure (it was written as a one-shot startup path, see
++   scene.cpp), so making it safely re-enterable would mean auditing and
++   rewriting every one of those failure paths. Relaunching the whole
++   process with the converted file as its new argument reuses that exact,
++   already-proven startup path instead of adding a second, less-tested one
++   -- the cost is losing the current camera/view state, which is what
++   opening any other new file would do anyway. */
++static void handleStepImportRequest()
++{
++    if (!StepImportAvailable())
++    {
++        showImportErrorDialog(
++            "This build of the viewer was compiled without STEP import "
++            "support (OpenCASCADE was not found when it was built).");
++        return;
++    }
++
++    std::string stepPath = pickStepFileViaZenity();
++    if (stepPath.empty())
++        return; /* cancelled, or zenity unavailable -- printed to stderr by the caller below in that second case */
++
++    std::string pdfPath, error;
++    if (!ImportStepToTempPdf(stepPath.c_str(), pdfPath, error))
++    {
++        showImportErrorDialog(error);
++        return;
++    }
++
++    /* argv[0] is not reliably an executable path (may be just a bare
++       command name resolved via PATH, or relative) -- /proc/self/exe is
++       the actual running binary regardless of how it was invoked. */
++    char selfPath[4096];
++    ssize_t len = readlink("/proc/self/exe", selfPath, sizeof(selfPath) - 1);
++    if (len <= 0)
++    {
++        showImportErrorDialog("Converted the file, but could not relaunch the viewer to show it (couldn't resolve the running executable's own path). The converted PDF was left at: " + pdfPath);
++        return;
++    }
++    selfPath[len] = '\0';
++
++    char *newArgv[3];
++    newArgv[0] = selfPath;
++    newArgv[1] = const_cast<char *>(pdfPath.c_str());
++    newArgv[2] = nullptr;
++    execv(selfPath, newArgv);
++
++    /* Only reached if execv itself failed to start the new process. */
++    showImportErrorDialog("Converted the file, but could not relaunch the viewer to show it. The converted PDF was left at: " + pdfPath);
++}
++
++/* Returns whether the mouse is over the menu bar, on the same terms
++   debugMenu()'s own return value does for the Debug window -- both feed
++   into the caller's single mouse_over_debug gate that suppresses viewport
++   rotate/pan/pick while over any UI chrome, so a click opening "File"
++   doesn't also start an arcball drag on the model underneath it. */
++static bool drawMainMenuBar()
++{
++    bool hovered = false;
++    if (ImGui::BeginMainMenuBar())
++    {
++        hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
++        if (ImGui::BeginMenu("File"))
++        {
++            if (ImGui::MenuItem("Import from STEP..."))
++                g_stepImportRequested = true;
++            ImGui::EndMenu();
++        }
++        ImGui::EndMainMenuBar();
++    }
++    return hovered;
++}
++
+ /* Reads back the current framebuffer and writes it to a PNG. Shared by
+    batch-mode (--output) and the interactive F12/"Save Screenshot" action. */
+ static bool saveScreenshotPNG(const char *path, int w, int h)
+@@ -1571,7 +1729,8 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+ 
+         glViewport(0, 0, _scene.width(), _scene.height());
+ 
+-        mouse_over_debug = debugMenu(time, deltaTime);
++        bool mouse_over_menu_bar = drawMainMenuBar();
++        mouse_over_debug = debugMenu(time, deltaTime) || mouse_over_menu_bar;
+         drawNormalDebugOverlay();
+         drawTrianglePickOverlay();
+         drawMeasureOverlay(_scene.width(), _scene.height());
+@@ -1582,6 +1741,16 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+         ImGui::Render();
+         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+ 
++        if (g_stepImportRequested)
++        {
++            g_stepImportRequested = false;
++            /* Blocking (zenity picker + OCCT conversion) is fine here --
++               matches how Ctrl+LeftClick triangle-pick and every other
++               synchronous action in this loop already work, and a
++               successful import ends this process via execv anyway. */
++            handleStepImportRequest();
++        }
++
+         if (g_screenshotRequested)
+         {
+             g_screenshotRequested = false;
+diff --git a/demos/viewer/src/step_import.cpp b/demos/viewer/src/step_import.cpp
+new file mode 100644
+index 0000000..bdd536e
+--- /dev/null
++++ b/demos/viewer/src/step_import.cpp
+@@ -0,0 +1,297 @@
++/* Copyright (C) 2023-2026 CascadiaVoxel LLC
++
++    nanoPRC is free software: you can redistribute it and/or modify it under
++    the terms of the GNU Affero General Public License as published by the
++    Free Software Foundation, either version 3 of the License, or (at your
++    option) any later version.
++
++    nanoPRC is distributed in the hope that it will be useful, but WITHOUT
++    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++    FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
++    License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
++*/
++
++#include "step_import.h"
++
++#include <STEPControl_Reader.hxx>
++#include <TopoDS_Shape.hxx>
++#include <TopoDS.hxx>
++#include <TopoDS_Face.hxx>
++#include <TopExp_Explorer.hxx>
++#include <TopAbs_ShapeEnum.hxx>
++#include <BRepMesh_IncrementalMesh.hxx>
++#include <BRep_Tool.hxx>
++#include <Poly_Triangulation.hxx>
++#include <TopLoc_Location.hxx>
++#include <Bnd_Box.hxx>
++#include <BRepBndLib.hxx>
++#include <gp_Pnt.hxx>
++#include <gp_Trsf.hxx>
++
++#include <prc_api.h>
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++#include <algorithm>
++#include <unistd.h>
++
++bool StepImportAvailable()
++{
++    return true;
++}
++
++namespace
++{
++
++/* One PRC part's worth of flattened triangle data, built from one STEP
++   solid. Kept as a struct (rather than writing straight into the
++   prc_api_write_* arrays) because those arrays need to stay alive,
++   unmoved, until prc_api_write_prc_buffer returns -- easiest to guarantee
++   by owning them in a vector of these that outlives that call. */
++struct SolidMesh
++{
++    std::string name;
++    std::vector<double> positions;
++    std::vector<uint32_t> triIndices;
++    std::vector<uint32_t> faceTriCounts;
++    double bboxMin[3];
++    double bboxMax[3];
++};
++
++/* Flattens every face's triangulation of one TopoDS_Shape (a single solid,
++   or the whole multi-solid shape for the fallback no-solids case) into one
++   SolidMesh, applying each face's own placement and orientation. Returns
++   false (mesh left however far it got) if the shape has no triangulated
++   faces at all -- BRepMesh_IncrementalMesh must have already run on the
++   OWNING top-level shape before this is called; TopoDS_Face triangulation
++   lives on the face regardless of which sub-shape explorer reached it. */
++bool FlattenShapeToMesh(const TopoDS_Shape &shape, SolidMesh &mesh)
++{
++    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next())
++    {
++        TopoDS_Face face = TopoDS::Face(exp.Current());
++        TopLoc_Location loc;
++        Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
++        if (tri.IsNull())
++            continue;
++
++        const gp_Trsf &trsf = loc.Transformation();
++        uint32_t base = (uint32_t)(mesh.positions.size() / 3);
++
++        for (Standard_Integer i = 1; i <= tri->NbNodes(); i++)
++        {
++            gp_Pnt p = tri->Node(i);
++            p.Transform(trsf);
++            mesh.positions.push_back(p.X());
++            mesh.positions.push_back(p.Y());
++            mesh.positions.push_back(p.Z());
++        }
++
++        /* STEP/OCCT faces can be reversed relative to their surface's
++           natural parametrization -- winding must flip to match, or this
++           face's normal (computed by nanoPRC's recalculated-normals path
++           from winding order) points inward. */
++        bool reversed = (face.Orientation() == TopAbs_REVERSED);
++
++        for (Standard_Integer i = 1; i <= tri->NbTriangles(); i++)
++        {
++            Standard_Integer n1, n2, n3;
++            tri->Triangle(i).Get(n1, n2, n3);
++            if (reversed) std::swap(n2, n3);
++            mesh.triIndices.push_back(base + (n1 - 1));
++            mesh.triIndices.push_back(base + (n2 - 1));
++            mesh.triIndices.push_back(base + (n3 - 1));
++        }
++        mesh.faceTriCounts.push_back((uint32_t)tri->NbTriangles());
++    }
++
++    return !mesh.triIndices.empty();
++}
++
++} // namespace
++
++bool ImportStepToTempPdf(const char *step_path, std::string &out_pdf_path, std::string &out_error)
++{
++    STEPControl_Reader reader;
++    if (reader.ReadFile(step_path) != IFSelect_RetDone)
++    {
++        out_error = "Could not read this file as STEP (ISO 10303) -- it may be malformed or not actually a STEP file.";
++        return false;
++    }
++    reader.TransferRoots();
++    TopoDS_Shape shape = reader.OneShape();
++    if (shape.IsNull())
++    {
++        out_error = "STEP file read, but it contains no usable geometry.";
++        return false;
++    }
++
++    /* 0.1 (file-native-unit) linear deflection -- STEP files are
++       overwhelmingly authored in mm, so this is a reasonably fine mesh for
++       typical mechanical-part sizes; not adaptive to model scale. */
++    BRepMesh_IncrementalMesh mesher(shape, 0.1, Standard_False, 0.5, Standard_True);
++
++    std::vector<SolidMesh> solids;
++    int solidIndex = 0;
++    for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next())
++    {
++        solidIndex++;
++        SolidMesh mesh;
++        mesh.name = "Solid " + std::to_string(solidIndex);
++        if (FlattenShapeToMesh(exp.Current(), mesh))
++        {
++            Bnd_Box bbox;
++            BRepBndLib::Add(exp.Current(), bbox);
++            bbox.Get(mesh.bboxMin[0], mesh.bboxMin[1], mesh.bboxMin[2],
++                     mesh.bboxMax[0], mesh.bboxMax[1], mesh.bboxMax[2]);
++            solids.push_back(std::move(mesh));
++        }
++    }
++
++    /* Some STEP files (e.g. a single-body part with no explicit SOLID
++       wrapper) have triangulated faces directly under the root shape with
++       no TopAbs_SOLID in between -- fall back to treating the whole shape
++       as one part rather than silently producing an empty PDF. */
++    if (solids.empty())
++    {
++        SolidMesh mesh;
++        mesh.name = "Solid 1";
++        if (!FlattenShapeToMesh(shape, mesh))
++        {
++            out_error = "STEP file read and tessellated, but no triangulated faces resulted -- the geometry may be degenerate.";
++            return false;
++        }
++        Bnd_Box bbox;
++        BRepBndLib::Add(shape, bbox);
++        bbox.Get(mesh.bboxMin[0], mesh.bboxMin[1], mesh.bboxMin[2],
++                 mesh.bboxMax[0], mesh.bboxMax[1], mesh.bboxMax[2]);
++        solids.push_back(std::move(mesh));
++    }
++
++    prc_context *ctx = prc_api_new_context(NULL);
++    if (ctx == NULL)
++    {
++        out_error = "Internal error: could not create a PRC write context.";
++        return false;
++    }
++
++    std::vector<prc_api_write_tessellation> tessEntries(solids.size());
++    std::vector<prc_api_write_rep_item> repItems(solids.size());
++    std::vector<prc_api_write_node> childNodes(solids.size());
++    std::vector<prc_api_write_node *> childPtrs(solids.size());
++
++    double rootMin[3] = { 1e300, 1e300, 1e300 };
++    double rootMax[3] = { -1e300, -1e300, -1e300 };
++
++    for (size_t i = 0; i < solids.size(); i++)
++    {
++        const SolidMesh &s = solids[i];
++
++        prc_api_write_tessellation &t = tessEntries[i];
++        memset(&t, 0, sizeof(t));
++        t.kind = PRC_API_WRITE_TESS_KIND_COMPRESSED;
++        t.positions = s.positions.data();
++        t.num_positions = (uint32_t)(s.positions.size() / 3);
++        t.tri_indices = s.triIndices.data();
++        t.num_triangles = (uint32_t)(s.triIndices.size() / 3);
++        t.face_tri_counts = s.faceTriCounts.data();
++        t.num_faces = (uint32_t)s.faceTriCounts.size();
++        t.crease_angle_degrees = 30.0;
++
++        prc_api_write_rep_item &ri = repItems[i];
++        memset(&ri, 0, sizeof(ri));
++        ri.kind = PRC_API_WRITE_RI_SURFACE;
++        ri.biased_tessellation_index = (uint32_t)(i + 1);
++
++        prc_api_write_node &node = childNodes[i];
++        memset(&node, 0, sizeof(node));
++        node.rep_items = &repItems[i];
++        node.num_rep_items = 1;
++        node.bbox_min[0] = s.bboxMin[0]; node.bbox_min[1] = s.bboxMin[1]; node.bbox_min[2] = s.bboxMin[2];
++        node.bbox_max[0] = s.bboxMax[0]; node.bbox_max[1] = s.bboxMax[1]; node.bbox_max[2] = s.bboxMax[2];
++        node.name = s.name.c_str();
++        node.part_name = s.name.c_str();
++
++        childPtrs[i] = &childNodes[i];
++
++        for (int k = 0; k < 3; k++)
++        {
++            rootMin[k] = std::min(rootMin[k], s.bboxMin[k]);
++            rootMax[k] = std::max(rootMax[k], s.bboxMax[k]);
++        }
++    }
++
++    /* Base name on the source file (matching how the app's own File>Open
++       names things), not the fixed string "model". */
++    std::string baseName = step_path;
++    size_t slashPos = baseName.find_last_of("/\\");
++    if (slashPos != std::string::npos) baseName = baseName.substr(slashPos + 1);
++    size_t dotPos = baseName.find_last_of('.');
++    if (dotPos != std::string::npos) baseName = baseName.substr(0, dotPos);
++    if (baseName.empty()) baseName = "Imported STEP";
++
++    prc_api_write_node root;
++    memset(&root, 0, sizeof(root));
++    root.bbox_min[0] = rootMin[0]; root.bbox_min[1] = rootMin[1]; root.bbox_min[2] = rootMin[2];
++    root.bbox_max[0] = rootMax[0]; root.bbox_max[1] = rootMax[1]; root.bbox_max[2] = rootMax[2];
++    root.name = baseName.c_str();
++
++    /* One flat part for the common single-solid case (matches how a
++       normal PRC file names its one part after the model, rather than
++       wrapping it in a redundant "Solid 1" sub-node); an assembly of
++       per-solid children otherwise. */
++    if (solids.size() == 1)
++    {
++        root.rep_items = &repItems[0];
++        root.num_rep_items = 1;
++        root.part_name = baseName.c_str();
++    }
++    else
++    {
++        root.children = childPtrs.data();
++        root.num_children = (uint32_t)childPtrs.size();
++    }
++
++    uint8_t *buf = NULL;
++    size_t bufSize = 0;
++    int code = prc_api_write_prc_buffer(ctx, baseName.c_str(), &root,
++        tessEntries.data(), (uint32_t)tessEntries.size(), &buf, &bufSize);
++    if (code < 0)
++    {
++        out_error = "Failed writing the converted geometry as PRC (internal error code " + std::to_string(code) + ").";
++        prc_api_release_context(ctx);
++        return false;
++    }
++
++    char tmpPath[] = "/tmp/3dpdf-viewer-import-XXXXXX.pdf";
++    /* mkstemps (not mkstemp) to keep the .pdf suffix -- nano_prc_viewer
++       and bin/3dpdf-view both dispatch on file extension. */
++    int fd = mkstemps(tmpPath, 4);
++    if (fd < 0)
++    {
++        out_error = "Could not create a temporary file for the converted PDF.";
++        prc_api_write_prc_buffer_free(ctx, buf);
++        prc_api_release_context(ctx);
++        return false;
++    }
++    close(fd); /* prc_api_pdf_embed_prc opens the path itself -- this fd was only to claim the unique name safely. */
++
++    code = prc_api_pdf_embed_prc(ctx, tmpPath, buf, bufSize, NULL);
++    prc_api_write_prc_buffer_free(ctx, buf);
++    if (code < 0)
++    {
++        out_error = "Converted the geometry, but failed embedding it into a PDF (internal error code " + std::to_string(code) + ").";
++        prc_api_release_context(ctx);
++        unlink(tmpPath);
++        return false;
++    }
++
++    prc_api_release_context(ctx);
++    out_pdf_path = tmpPath;
++    return true;
++}
+diff --git a/demos/viewer/src/step_import.h b/demos/viewer/src/step_import.h
+new file mode 100644
+index 0000000..b656be9
+--- /dev/null
++++ b/demos/viewer/src/step_import.h
+@@ -0,0 +1,53 @@
++/* Copyright (C) 2023-2026 CascadiaVoxel LLC
++
++    nanoPRC is free software: you can redistribute it and/or modify it under
++    the terms of the GNU Affero General Public License as published by the
++    Free Software Foundation, either version 3 of the License, or (at your
++    option) any later version.
++
++    nanoPRC is distributed in the hope that it will be useful, but WITHOUT
++    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++    FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
++    License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
++*/
++
++#pragma once
++
++#include <string>
++
++/* STEP (ISO 10303) import, bridging OpenCASCADE (STEP read + tessellate)
++   into nanoPRC's own write API (tessellation -> PRC -> PDF). Two
++   implementations exist -- step_import.cpp (real, built only when
++   OpenCASCADE was found at configure time) and step_import_stub.cpp (a
++   stand-in that always fails with a clear message, built otherwise) --
++   selected by demos/viewer/CMakeLists.txt so this header's callers never
++   need to know which one they got.
++
++   SCOPE: converts geometry only (every solid in the file, tessellated,
++   each becoming its own PRC part so the viewer's per-part Scene tree stays
++   useful). Does NOT carry over STEP assembly names/hierarchy (every solid
++   in the file is flattened into one level, named "Solid N"), colors, or
++   PMI/metadata -- nanoPRC's write API has no color/material/style
++   parameters to hand any of that to even if this code extracted it. This
++   is geometry-only import, not a STEP-to-3D-PDF archival tool. */
++
++/* Converts step_path to a new temporary 3D PDF (via OpenCASCADE tessellation
++   + nanoPRC's write API) and writes its path to out_pdf_path. The file is
++   NOT cleaned up automatically -- it needs to outlive this call so the
++   caller can hand it to a fresh viewer process; delete it once that
++   process has loaded it, or just leave it (it's under the system temp
++   directory).
++
++   Returns true on success. Returns false and fills out_error with a
++   human-readable message (safe to show directly in a dialog) on failure,
++   including when this build has no STEP import support at all. */
++bool ImportStepToTempPdf(const char *step_path, std::string &out_pdf_path, std::string &out_error);
++
++/* Whether this build was compiled with STEP import support (OpenCASCADE
++   found at build time) -- lets the caller decide whether to even attempt
++   ImportStepToTempPdf, e.g. to skip the file-picker step and go straight
++   to an explanatory dialog. */
++bool StepImportAvailable();
+diff --git a/demos/viewer/src/step_import_stub.cpp b/demos/viewer/src/step_import_stub.cpp
+new file mode 100644
+index 0000000..5ecbf07
+--- /dev/null
++++ b/demos/viewer/src/step_import_stub.cpp
+@@ -0,0 +1,36 @@
++/* Copyright (C) 2023-2026 CascadiaVoxel LLC
++
++    nanoPRC is free software: you can redistribute it and/or modify it under
++    the terms of the GNU Affero General Public License as published by the
++    Free Software Foundation, either version 3 of the License, or (at your
++    option) any later version.
++
++    nanoPRC is distributed in the hope that it will be useful, but WITHOUT
++    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++    FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
++    License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
++*/
++
++#include "step_import.h"
++
++/* Built instead of step_import.cpp when demos/viewer/CMakeLists.txt did not
++   find OpenCASCADE at configure time -- see that file for the selection
++   logic. Keeps the menu item itself unconditional in main.cpp (always
++   visible, so its absence is never a silent "why isn't this here"), with
++   the explanation surfacing only when actually invoked. */
++
++bool StepImportAvailable()
++{
++    return false;
++}
++
++bool ImportStepToTempPdf(const char *, std::string &, std::string &out_error)
++{
++    out_error = "This build of the viewer was compiled without STEP import "
++        "support (OpenCASCADE was not found when it was built). Install "
++        "libocct-data-exchange-dev and rebuild to enable it.";
++    return false;
++}
+-- 
+2.47.3
+
