@@ -46,7 +46,7 @@ if ! command -v apt-get >/dev/null 2>&1; then
     echo "build dependencies (see https://wiki.libsdl.org/SDL3/README-linux for" >&2
     echo "the equivalent package names on your distro), then:" >&2
     echo "  git submodule update --init --recursive" >&2
-    echo "  for p in patches/*.patch; do git -C third_party/nanoPRC am \"\$p\"; done" >&2
+    echo "  for p in patches/*.patch; do git -C third_party/nanoPRC apply \"\$p\"; done" >&2
     echo "  cmake -S third_party/nanoPRC -B third_party/nanoPRC/build -DCMAKE_BUILD_TYPE=Release" >&2
     echo "  cmake --build third_party/nanoPRC/build --target nano_prc_viewer" >&2
     exit 1
@@ -87,10 +87,17 @@ cd "$REPO_ROOT"
 git submodule update --init --recursive
 
 echo "==> Applying vendored patches to nanoPRC"
+# `git am` writes commits, so it needs a committer identity -- and a machine that has
+# never had `git config user.name`/`user.email` set has none, which is the normal state
+# of a fresh CI runner or of anyone who only ever clones. Pass one on the command line
+# rather than inherit it: this leaves the user's own git config untouched, and the name
+# only ever lands on throwaway commits inside the submodule's own history.
 for patch in "$REPO_ROOT"/patches/*.patch; do
     [ -e "$patch" ] || continue
     if git -C "$NANOPRC_DIR" apply --check "$patch" 2>/dev/null; then
-        git -C "$NANOPRC_DIR" am --keep-non-patch "$patch"
+        git -C "$NANOPRC_DIR" \
+            -c user.name="3dpdf-viewer setup" -c user.email="setup@localhost" \
+            am --keep-non-patch "$patch"
         echo "    applied $(basename "$patch")"
     elif git -C "$NANOPRC_DIR" apply --reverse --check "$patch" 2>/dev/null; then
         echo "    $(basename "$patch") already applied, skipping"

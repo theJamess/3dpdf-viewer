@@ -66,10 +66,14 @@ sudo apt-get install -y -qq \
 echo "==> Fetching nanoPRC submodule + applying patches"
 cd "$REPO_ROOT"
 git submodule update --init --recursive
+# Identity passed explicitly for the same reason as in scripts/setup.sh: `git am` commits,
+# and a machine that has never configured git has no committer identity to commit as.
 for patch in "$REPO_ROOT"/patches/*.patch; do
     [ -e "$patch" ] || continue
     if git -C "$NANOPRC_DIR" apply --check "$patch" 2>/dev/null; then
-        git -C "$NANOPRC_DIR" am --keep-non-patch "$patch"
+        git -C "$NANOPRC_DIR" \
+            -c user.name="3dpdf-viewer setup" -c user.email="setup@localhost" \
+            am --keep-non-patch "$patch"
     elif git -C "$NANOPRC_DIR" apply --reverse --check "$patch" 2>/dev/null; then
         : # already applied
     else
