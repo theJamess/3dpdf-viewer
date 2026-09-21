@@ -62,6 +62,10 @@ sudo apt-get install -y -qq \
 sudo apt-get install -y -qq \
     libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev \
     || echo "    (skipped one or more optional Wayland/pipewire packages -- not fatal)"
+sudo apt-get install -y -qq \
+    libocct-data-exchange-dev libocct-modeling-algorithms-dev libocct-visualization-dev \
+    libfontconfig-dev libtbb-dev \
+    || echo "    (OpenCASCADE not available on this build machine -- packaged binary will have STEP import compiled out)"
 
 echo "==> Fetching nanoPRC submodule + applying patches"
 cd "$REPO_ROOT"
@@ -113,6 +117,44 @@ install -m755 "$NANO_PRC_LIB" "$STAGING/usr/lib/3dpdf-viewer/libnano_prc.so"
 # wherever the package actually lands.
 patchelf --set-rpath '$ORIGIN' "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer"
 
+# OpenCASCADE (STEP import), unlike SDL3, isn't statically linked -- OCCT's
+# shared libraries are the normal way to consume it, and there's no quick
+# static-build equivalent of -DSDL_STATIC=ON to reach for. Instead, derive
+# the extra runtime Depends: directly from what the built binary actually
+# links (via ldd + dpkg -S, so this adapts to whatever OCCT ABI version is
+# on THIS build machine rather than a hardcoded version string that would
+# go stale the moment a newer OCCT lands in the repos) -- and only if
+# OpenCASCADE was actually found and linked in the first place, so a build
+# machine without it still produces a working .deb with one less feature,
+# never a package that claims a dependency it doesn't need.
+EXTRA_DEPENDS=""
+if ldd "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer" 2>/dev/null | grep -qi "libTKDESTEP"; then
+    echo "==> STEP import is linked in -- resolving its extra runtime packages"
+    EXTRA_LIBS="$(ldd "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer" | awk '{print $3}' | grep -E '/libTK|/libfontconfig|/libtbb' || true)"
+    EXTRA_PKGS=""
+    for lib in $EXTRA_LIBS; do
+        # realpath: ldd reports /lib/... (the merged-usr symlink path), but
+        # dpkg's own recorded file lists use the real /usr/lib/... path --
+        # `dpkg -S` matches literally, not through symlinks, so without
+        # this every lookup below silently comes back empty.
+        # `|| true`: dpkg -S exits nonzero for a library not owned by any
+        # package (rare here, but possible for something resolved via a
+        # non-dpkg-managed path) -- under this script's `set -e -o
+        # pipefail`, that would otherwise abort the whole build over one
+        # unresolvable dependency instead of just skipping it.
+        reallib="$(realpath "$lib" 2>/dev/null || echo "$lib")"
+        pkg="$( (dpkg -S "$reallib" 2>/dev/null || true) | head -1 | cut -d: -f1)"
+        if [ -n "$pkg" ]; then
+            case " $EXTRA_PKGS " in
+                *" $pkg "*) ;; # already have it
+                *) EXTRA_PKGS="$EXTRA_PKGS $pkg" ;;
+            esac
+        fi
+    done
+    EXTRA_DEPENDS="$(echo "$EXTRA_PKGS" | xargs -n1 | paste -sd, - | sed 's/,/, /g')"
+    echo "    resolved: $EXTRA_DEPENDS"
+fi
+
 install -m755 "$REPO_ROOT/bin/3dpdf-view" "$STAGING/usr/bin/3dpdf-view"
 
 sed "s#REPO_ROOT/bin/3dpdf-view#/usr/bin/3dpdf-view#" \
@@ -155,7 +197,7 @@ Section: graphics
 Priority: optional
 Architecture: $ARCH
 Installed-Size: $INSTALLED_SIZE_KB
-Depends: libc6, libstdc++6, libx11-6, libgl1
+Depends: libc6, libstdc++6, libx11-6, libgl1${EXTRA_DEPENDS:+, $EXTRA_DEPENDS}
 Recommends: zenity
 Maintainer: 3D PDF Viewer project
 Description: View and rotate 3D models embedded in PDF files
@@ -183,6 +225,12 @@ echo "==> Verifying the packaged binary carries no libSDL3.so runtime dependency
 if ldd "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer" 2>/dev/null | grep -qi sdl3; then
     echo "build-deb.sh: packaged binary still links libSDL3.so -- static SDL3 build did not take effect as expected." >&2
     exit 1
+fi
+
+if [ -n "$EXTRA_DEPENDS" ]; then
+    echo "==> STEP import: enabled (OpenCASCADE found and linked)"
+else
+    echo "==> STEP import: NOT enabled in this package (OpenCASCADE wasn't found on this build machine) -- File > Import from STEP will report unavailable"
 fi
 
 echo "==> Building the .deb"

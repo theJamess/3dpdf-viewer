@@ -66,6 +66,12 @@ Only Debian/Ubuntu (apt-based) systems are supported — `setup.sh` detects
 other package managers (dnf, pacman, zypper, apk) and fails with a clear
 message and manual-build pointers rather than a bare command-not-found.
 
+`setup.sh` also tries (best-effort) to install [OpenCASCADE](https://dev.opencascade.org/),
+needed for the **File > Import from STEP** menu item — see "Controls"
+below. If it's not available on your release, everything else still
+builds; that one menu item just reports itself unavailable instead of
+converting anything.
+
 **Option B — install a pre-built `.deb`:** grab one from a
 [GitHub Actions run](../../actions/workflows/build.yml) (the `3dpdf-viewer-deb`
 artifact) or build it yourself:
@@ -79,7 +85,12 @@ No compiler needed on the machine that installs it — `build-deb.sh`
 compiles nanoPRC's SDL3 dependency statically into the binary rather than
 relying on the target system's own SDL3 packaging (which, per the note
 above, most current Ubuntu releases don't have yet), so the package has
-no `libsdl3-0`-style runtime dependency to satisfy.
+no `libsdl3-0`-style runtime dependency to satisfy. If OpenCASCADE was
+available on the machine that ran `build-deb.sh`, the `.deb`'s own
+`Depends:` picks up the matching OCCT runtime packages automatically
+(resolved from what actually got linked, not hardcoded) so **File > Import
+from STEP** works out of the box; if it wasn't, the `.deb` still installs
+fine with that one feature unavailable.
 
 ## Usage
 
@@ -151,6 +162,22 @@ ISO 14739-1 spec to check against), so rather than risk a confidently-wrong
 millimeter figure, it's left as file units; see the Measure tab's own text
 and this feature's patch for detail.
 
+**Import from STEP**: the **File** menu's **Import from STEP...** item opens a
+STEP (ISO 10303, `.step`/`.stp`) file, converts it, and loads the result —
+letting you look at STEP files with this viewer's rotate/pan/zoom/Section/
+Measure tools even though STEP isn't a 3D-PDF format. Picking a file
+relaunches the viewer showing the converted model (any unsaved view state
+from what you had open is lost, same as opening any other new file). This
+is **geometry only**: every solid in the STEP file becomes its own part
+(so multi-part assemblies stay individually selectable in the Scene tab),
+but STEP's own part names/hierarchy, colors, and PMI/metadata are not
+carried over — parts are just named "Solid 1", "Solid 2", etc. Needs
+[OpenCASCADE](https://dev.opencascade.org/) (`libocct-data-exchange-dev`
+and a few sibling packages) at build time; `scripts/setup.sh` and
+`scripts/build-deb.sh` both try to install it best-effort — if it's not
+available, the menu item stays present but reports that clearly instead of
+doing anything, rather than the build failing or the item silently vanishing.
+
 Three sample 3D PDFs to try are included at
 `third_party/nanoPRC/examples/` (`cube.pdf`, `cylinder.pdf`, `triangle.pdf`).
 
@@ -216,6 +243,14 @@ licensing.
   world-space bounding-box center instead; see the patch's own commit
   message for how this was caught and verified (two Xvfb screenshots a
   few seconds apart, before and after the fix).
+- `patches/0008-step-import.patch` — adds **File > Import from STEP**
+  (see "Controls" above): bridges OpenCASCADE (STEP read + tessellate)
+  into nanoPRC's own pre-existing write API (unmodified by this patch)
+  to produce a real 3D PDF the viewer then loads normally. Geometry only
+  — no STEP assembly names/hierarchy, colors, or PMI; see "Controls"
+  above for the full scope note. Best-effort dependency: builds and
+  works without it, just without that one menu item, on a system without
+  OpenCASCADE available.
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 

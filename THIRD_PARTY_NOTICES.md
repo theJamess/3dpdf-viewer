@@ -48,9 +48,30 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
     dead "Enable Auto Motion" checkbox (Views tab) in
     `demos/viewer/src/main.cpp` into a real idle turntable auto-rotate
     (see README.md's "Controls" section).
+  - `patches/0008-step-import.patch` adds a **File > Import from STEP**
+    menu item (`demos/viewer/src/main.cpp`, new files
+    `demos/viewer/src/step_import.{h,cpp,_stub.cpp}`), plus the CMake
+    wiring to find and link OpenCASCADE for it (`CMakeLists.txt`,
+    `demos/viewer/CMakeLists.txt`). Bridges OpenCASCADE (STEP read +
+    tessellate) into nanoPRC's own pre-existing write API, which this
+    patch does not modify. See README.md's "Controls" section for scope
+    (geometry only) and the "OpenCASCADE" notice below for its license.
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,
   `scripts/setup.sh`, `scripts/build-deb.sh`, the `.desktop` entry, and the
   patches above), Copyright (C) 2026 theJamess, is distributed under the
   same license (AGPLv3, see [LICENSE](LICENSE)) for simplicity.
+
+## OpenCASCADE (OCCT)
+
+Optional runtime dependency, used only by patches/0008's **File > Import
+from STEP** feature — not vendored/embedded in this repository; installed
+as a normal system package (`libocct-data-exchange-dev` and siblings) and
+dynamically linked, the same way SDL3, X11, and OpenGL already are.
+
+- Source: https://dev.opencascade.org/
+- License: LGPL 2.1, with an exception clause permitting embedding OCCT's
+  header files in derived work (does not require this project or its
+  own license to change — LGPL is designed to be linked from
+  differently-licensed, including copyleft, software).

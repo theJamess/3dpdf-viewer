@@ -82,6 +82,16 @@ sudo apt-get install -y -qq \
     libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev \
     || echo "    (skipped one or more optional Wayland/pipewire packages -- not fatal)"
 
+# OpenCASCADE (OCCT), for the viewer's File > Import from STEP menu item --
+# best-effort like the block above: CMakeLists.txt (patches/0008) detects
+# whether this was found and falls back to a stub that reports the feature
+# unavailable at runtime, so a missing/unavailable OCCT package on some
+# release degrades that one menu item, not the whole build.
+sudo apt-get install -y -qq \
+    libocct-data-exchange-dev libocct-modeling-algorithms-dev libocct-visualization-dev \
+    libfontconfig-dev libtbb-dev \
+    || echo "    (OpenCASCADE not available on this release -- File > Import from STEP will report unavailable, everything else still builds)"
+
 echo "==> Fetching nanoPRC submodules"
 cd "$REPO_ROOT"
 git submodule update --init --recursive
