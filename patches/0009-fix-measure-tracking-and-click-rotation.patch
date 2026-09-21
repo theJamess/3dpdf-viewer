@@ -1,4 +1,4 @@
-From cdbe148855f30ee6489149332d3eba5bb1aca178 Mon Sep 17 00:00:00 2001
+From 3e589b261a73dc4c02e8fcc6feb2757bd8c4daf2 Mon Sep 17 00:00:00 2001
 From: 3dpdf <3dpdf@users.noreply.github.com>
 Date: Mon, 21 Sep 2026 14:33:52 -0500
 Subject: [PATCH] Fix Measure tab: points detaching on rotation, spurious
@@ -14,10 +14,11 @@ Two real bugs in patches/0006's Measure tab, found by hands-on testing:
    out from under it, visibly detaching the marker from the part. Fixed by
    storing (product, local-space position) instead and re-deriving the
    live world position every frame via that product's *current*
-   localToWorld() (measurePointWorldPos()). Verified: A-B distance now
-   reads bit-for-bit identical (16.074833 file units) before and after a
-   large further rotation, which a rigid transform must preserve and the
-   old code did not.
+   localToWorld() (measurePointWorldPos()). Verified with two points on
+   two genuinely different products (a PCB and its enclosure): the A-B
+   distance stays bit-for-bit stable (68.371719 -> 68.371704, float32
+   noise only) across a large further rotation and a pan, which a rigid
+   transform must preserve and the old code did not.
 
 2. Ctrl+LeftClick-to-pick shared the arcball rotate code's condition
    (mouseDown && mouseMoved), which has no minimum-drag threshold at all --
@@ -25,9 +26,23 @@ Two real bugs in patches/0006's Measure tab, found by hands-on testing:
    checked for "was this basically just a click". Any incidental mouse
    jitter between button-down and button-up (normal for a physical mouse)
    fed a nonzero delta into the rotate math and nudged the model, even
-   though the same click correctly registered as a pick. Fixed by
-   suppressing the rotate-apply block outright while Ctrl is held, since
-   Ctrl+drag has no defined meaning here today.
+   though the same click correctly registered as a pick.
+
+   First attempt at a fix (polling SDL_GetModState() live each frame and
+   suppressing rotation while Ctrl reads held) turned out incomplete: a
+   human's Ctrl-up and mouse-up rarely land on the exact same frame, so a
+   live poll can read Ctrl as already released for the last frame or two
+   of the click and let a small rotation through right at the end -- this
+   surfaced as "still jumps a little" in testing even after that fix.
+
+   Fixed properly by latching instead of polling: mouseDownWithCtrl is set
+   the instant Ctrl is seen held (at button-down, or any frame during the
+   hold, in case Ctrl is pressed after the button), and stays set for the
+   rest of that left-button gesture even if Ctrl is released early. The
+   rotate-apply block checks the latch, not a live poll. Verified by
+   deliberately releasing Ctrl one frame before mouse-up (xdotool keyup
+   before mouseup) on two different files -- no rotation, and the pick
+   still registers correctly.
 
 Also: Ctrl+LeftClick now drops the pick straight into the first empty
 Measure slot (A, then B, then C) instead of requiring a separate "Set
@@ -35,11 +50,11 @@ Point X from last pick" button click every time -- that button is now
 specifically for *re*-assigning one slot after all three are already
 set, without disturbing the other two.
 ---
- demos/viewer/src/main.cpp | 115 ++++++++++++++++++++++++++++++--------
- 1 file changed, 93 insertions(+), 22 deletions(-)
+ demos/viewer/src/main.cpp | 130 +++++++++++++++++++++++++++++++-------
+ 1 file changed, 107 insertions(+), 23 deletions(-)
 
 diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
-index 113f774..9c1d3e4 100644
+index 113f774..c0923d4 100644
 --- a/demos/viewer/src/main.cpp
 +++ b/demos/viewer/src/main.cpp
 @@ -134,6 +134,16 @@ struct PickResult
@@ -239,17 +254,67 @@ index 113f774..9c1d3e4 100644
          float lba = length(ba), lbc = length(bc);
          if (lba > 1e-9f && lbc > 1e-9f)
          {
-@@ -1579,7 +1633,8 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+@@ -1326,6 +1380,15 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+ 
+     bool keys[SDL_SCANCODE_COUNT] = { 0 };
+     bool mouseDown = false;
++    /* Latched, not polled live: true if Ctrl was ever seen held during the
++       current left-button hold. A live SDL_GetModState() check per frame
++       has a real gap -- a human's Ctrl-up and mouse-up rarely land on the
++       exact same frame, so a live check can read Ctrl as already released
++       for the last frame or two of a Ctrl+click and let a small rotation
++       through right at the end. This flag is set the instant Ctrl is seen
++       held (button-down or any frame during the drag) and stays set for
++       the rest of the gesture even if Ctrl is released a moment early. */
++    bool mouseDownWithCtrl = false;
+     bool mouseMoved = false;
+     bool pickRequest = false;
+     int pickX = 0;
+@@ -1455,6 +1518,8 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                 {
+                     mouseX_buttondown = evt.motion.x;
+                     mouseY_buttondown = evt.motion.y;
++                    if (SDL_GetModState() & SDL_KMOD_CTRL)
++                        mouseDownWithCtrl = true;
+                 }
+                 else if (!mouseDown)
+                 {
+@@ -1478,6 +1543,7 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                 {
+                     curr_mat = _scene.models()[0].model();
+                     mouseDown = true;
++                    mouseDownWithCtrl = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
+                 }
+                 else if (evt.button.button == SDL_BUTTON_MIDDLE)
+                 {
+@@ -1494,7 +1560,8 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                     int dy = (int)evt.button.y - mouseY_buttondown;
+                     int dragPixels = std::abs(dx) + std::abs(dy);
+                     SDL_Keymod mod = SDL_GetModState();
+-                    if ((mod & SDL_KMOD_CTRL) && !mouse_over_debug && dragPixels <= 3)
++                    bool ctrlForThisClick = mouseDownWithCtrl || ((mod & SDL_KMOD_CTRL) != 0);
++                    if (ctrlForThisClick && !mouse_over_debug && dragPixels <= 3)
+                     {
+                         if (Product::cpuPickStorageLimited())
+                         {
+@@ -1509,6 +1576,7 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                         }
+                     }
+                     mouseDown = false;
++                    mouseDownWithCtrl = false;
+                 }
+                 else if (evt.button.button == SDL_BUTTON_MIDDLE)
+                 {
+@@ -1579,7 +1647,7 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
  
          /* This is an arcball or trackball implementation for rotating the 3D part
             with the mouse. Math from Ken Shoemake 1992 */
 -        if ((mouseDown && mouseMoved && !mouse_over_debug) || mouse_wheel_delta != 0)
-+        bool ctrlHeldForRotate = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
-+        if ((mouseDown && mouseMoved && !mouse_over_debug && !ctrlHeldForRotate) || mouse_wheel_delta != 0)
++        if ((mouseDown && mouseMoved && !mouse_over_debug && !mouseDownWithCtrl) || mouse_wheel_delta != 0)
          {
              Matrix4 mat;
  
-@@ -1661,6 +1716,22 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+@@ -1661,6 +1729,22 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
                  &g_lastPick))
              {
                  printPickResult(g_lastPick);

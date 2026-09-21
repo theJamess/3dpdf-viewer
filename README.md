@@ -267,9 +267,14 @@ licensing.
   shared the arcball rotate code's condition, which had no minimum-drag
   threshold, so ordinary mouse jitter during a click nudged the model even
   though the same click correctly registered as a pick — fixed by
-  suppressing rotation outright while Ctrl is held. Also: Ctrl+LeftClick
-  now sets the next A/B/C point directly; "Set Point X from last pick" is
-  now specifically for re-assigning one point after all three are set.
+  suppressing rotation for the whole click gesture once Ctrl is seen held
+  (latched at button-down/first-seen, not polled live, since a live check
+  has its own gap: a human's Ctrl-up and mouse-up rarely land on the same
+  frame, so it can miss the last frame or two of the click — see the
+  patch's own commit message for how this was caught and verified). Also:
+  Ctrl+LeftClick now sets the next A/B/C point directly; "Set Point X from
+  last pick" is now specifically for re-assigning one point after all
+  three are set.
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 
