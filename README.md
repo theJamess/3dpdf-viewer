@@ -291,13 +291,32 @@ this pattern.
 
 ## Screenshots
 
-`screenshots/01-cube.png`, `screenshots/02-rotated-cylinder.png` (mid-rotation,
-via mouse drag), `screenshots/03-triangle.png`, `screenshots/04-panned-cylinder.png`
-(mid-pan, via middle-mouse drag), `screenshots/05-cross-section.png` (the
-Section tab's clipping plane cutting into the cube), `screenshots/06-measure-
-distance-angle.png` (the Measure tab with three points picked on the cube,
-showing both the panel readout and the in-viewport distance/angle overlay)
-— all rendered from this repo's own build against the bundled example PDFs.
+All rendered from this repo's own build against the bundled example PDFs in
+`third_party/nanoPRC/examples/`.
+
+**`cube.pdf`, as first opened**
+
+![A white cube with a magenta top face on a grey background, lit from above](screenshots/01-cube.png)
+
+**Mid-rotation, via left-mouse drag**
+
+![A magenta cylinder tilted off its starting axis part-way through a drag rotation](screenshots/02-rotated-cylinder.png)
+
+**`triangle.pdf`**
+
+![A flat yellow triangle on a grey background](screenshots/03-triangle.png)
+
+**Mid-pan, via middle-mouse drag**
+
+![The magenta cylinder shifted right of centre by a pan, with the F1 control-hint caption visible at the bottom left](screenshots/04-panned-cylinder.png)
+
+**The Section tab's clipping plane, cutting into the cube**
+
+![The cube with the Section tab's clipping plane applied](screenshots/05-cross-section.png)
+
+**The Measure tab, with three points picked on the cube**
+
+![The Measure tab with points A, B and C picked, the panel reporting the A-B distance and the angle at B, and the same values drawn as an overlay in the viewport](screenshots/06-measure-distance-angle.png)
 
 ## License
 
