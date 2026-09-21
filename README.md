@@ -151,11 +151,14 @@ plane (pick an axis, slide the offset, optionally flip which side is kept)
 — useful for looking inside an enclosure without hiding parts one at a time.
 
 **Measure**: the **Measure** tab turns picked points (Ctrl+left-click, same
-as Triangle Pick above) into a distance and angle tool — click "Set Point
-A/B/C from last pick" after picking each point; A-B gives a distance, and
-A-B-C gives the angle at B. Picked points, the line(s) between them, and
-the live distance/angle are also drawn directly in the viewport, not just
-the panel. Values are reported in **file units, not millimeters** — PRC
+as Triangle Pick above) into a distance and angle tool — Ctrl+left-click
+drops each pick straight into the first empty slot (A, then B, then C); once
+all three are set, use the "Set Point A/B/C from last pick" buttons to
+re-assign one specific point without disturbing the others. A-B gives a
+distance, and A-B-C gives the angle at B. Picked points, the line(s) between
+them, and the live distance/angle are also drawn directly in the viewport,
+not just the panel, and stay attached to the part as it's rotated/panned
+further. Values are reported in **file units, not millimeters** — PRC
 carries a per-file CAD-unit scale field, but this project could not
 independently confirm which direction it converts (no bundled copy of the
 ISO 14739-1 spec to check against), so rather than risk a confidently-wrong
@@ -251,6 +254,22 @@ licensing.
   above for the full scope note. Best-effort dependency: builds and
   works without it, just without that one menu item, on a system without
   OpenCASCADE available.
+- `patches/0009-fix-measure-tracking-and-click-rotation.patch` — fixes two
+  bugs in 0006's Measure tab, both found by hands-on testing. First, a
+  measured point was cached as a single world-space position, which went
+  stale (visibly detaching from the part) on any further rotation, because
+  rotating/panning here moves the *product*'s own transform, not the
+  camera — 0006 assumed the opposite. Fixed by storing (product,
+  local-space position) and re-deriving the live world position every
+  frame from that product's *current* transform; verified by checking the
+  A-B distance is bit-for-bit unchanged across an unrelated further
+  rotation, which a rigid transform must preserve. Second, Ctrl+LeftClick
+  shared the arcball rotate code's condition, which had no minimum-drag
+  threshold, so ordinary mouse jitter during a click nudged the model even
+  though the same click correctly registered as a pick — fixed by
+  suppressing rotation outright while Ctrl is held. Also: Ctrl+LeftClick
+  now sets the next A/B/C point directly; "Set Point X from last pick" is
+  now specifically for re-assigning one point after all three are set.
 
 ## Fixed: some assemblies used to render with parts in the wrong place
 

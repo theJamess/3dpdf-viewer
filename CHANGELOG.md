@@ -15,6 +15,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   when available and degrade to a clear "not available" dialog (instead
   of failing the whole build) when it isn't.
 
+### Fixed
+- Measure tab (`patches/0009`): a measured point would visibly detach from
+  the part on any further rotation, because it was cached as a world-space
+  position while rotating/panning actually moves the product, not the
+  camera. Points now track the surface they were picked on. Also fixed
+  Ctrl+LeftClick occasionally nudging the model a little on pick (ordinary
+  mouse jitter was feeding the arcball rotate with no minimum-drag
+  threshold); Ctrl+LeftClick now also sets the next A/B/C point directly
+  instead of requiring a separate button click each time.
+
 ## [0.1.0] - 2026-09-21
 
 First tagged release.

@@ -1,0 +1,277 @@
+From cdbe148855f30ee6489149332d3eba5bb1aca178 Mon Sep 17 00:00:00 2001
+From: 3dpdf <3dpdf@users.noreply.github.com>
+Date: Mon, 21 Sep 2026 14:33:52 -0500
+Subject: [PATCH] Fix Measure tab: points detaching on rotation, spurious
+ rotate-on-click
+
+Two real bugs in patches/0006's Measure tab, found by hands-on testing:
+
+1. Measured points were stored as a single cached world-space position
+   (g_lastPick.hitPos at pick time). But rotating/panning in this viewer
+   moves the *product*, not the camera (_scene.models()[0].setModel(...)),
+   so a world-space point goes stale the instant the user rotates again --
+   it stays fixed in world space while the surface it was picked on moves
+   out from under it, visibly detaching the marker from the part. Fixed by
+   storing (product, local-space position) instead and re-deriving the
+   live world position every frame via that product's *current*
+   localToWorld() (measurePointWorldPos()). Verified: A-B distance now
+   reads bit-for-bit identical (16.074833 file units) before and after a
+   large further rotation, which a rigid transform must preserve and the
+   old code did not.
+
+2. Ctrl+LeftClick-to-pick shared the arcball rotate code's condition
+   (mouseDown && mouseMoved), which has no minimum-drag threshold at all --
+   only the *separate* pick-vs-drag classifier (dragPixels <= 3) ever
+   checked for "was this basically just a click". Any incidental mouse
+   jitter between button-down and button-up (normal for a physical mouse)
+   fed a nonzero delta into the rotate math and nudged the model, even
+   though the same click correctly registered as a pick. Fixed by
+   suppressing the rotate-apply block outright while Ctrl is held, since
+   Ctrl+drag has no defined meaning here today.
+
+Also: Ctrl+LeftClick now drops the pick straight into the first empty
+Measure slot (A, then B, then C) instead of requiring a separate "Set
+Point X from last pick" button click every time -- that button is now
+specifically for *re*-assigning one slot after all three are already
+set, without disturbing the other two.
+---
+ demos/viewer/src/main.cpp | 115 ++++++++++++++++++++++++++++++--------
+ 1 file changed, 93 insertions(+), 22 deletions(-)
+
+diff --git a/demos/viewer/src/main.cpp b/demos/viewer/src/main.cpp
+index 113f774..9c1d3e4 100644
+--- a/demos/viewer/src/main.cpp
++++ b/demos/viewer/src/main.cpp
+@@ -134,6 +134,16 @@ struct PickResult
+     Vector3 worldN1;
+     Vector3 worldN2;
+     Vector3 hitPos;
++    /* hitPos re-expressed in the picked product's own local space (i.e.
++       with that product's localToWorld() undone). Rotating/panning the
++       viewport moves the *product*, not the camera (see the arcball/pan
++       code below), so a point meant to stay attached to the surface it
++       was picked on has to be re-transformed by the product's *current*
++       localToWorld() every frame -- storing only the world-space hitPos
++       (as this used to) freezes the point in place while the part rotates
++       out from under it. See MeasurePoint below, which is what actually
++       needed this. */
++    Vector3 localHitPos;
+     Vector3 faceNormal;
+     float dotFaceAvgNormal;
+ };
+@@ -307,6 +317,7 @@ static bool pickTriangleAtScreenPoint(int mouseX, int mouseY, int viewportW,
+                 best.worldN1 = wn1;
+                 best.worldN2 = wn2;
+                 best.hitPos = rayOrigin + rayDir * t;
++                best.localHitPos = transformPoint(inverse(model), best.hitPos);
+                 best.faceNormal = faceN;
+                 best.dotFaceAvgNormal = dot(faceN, avgN);
+             };
+@@ -349,10 +360,23 @@ static bool pickTriangleAtScreenPoint(int mouseX, int mouseY, int viewportW,
+     return best.valid;
+ }
+ 
+-/* Point-to-point/angle measurement: reuses g_lastPick's world-space hit
+-   position (the ray-triangle intersection already computed for Triangle
+-   Pick) rather than adding a second mouse gesture -- "Set Point A/B/C"
+-   buttons in the Measure tab just copy whatever was last picked.
++/* Point-to-point/angle measurement: a successful Ctrl+LeftClick pick (see
++   Triangle Pick above) auto-fills the first empty slot of A/B/C; the
++   "Set Point A/B/C from last pick" buttons in the Measure tab exist to
++   *re*-assign one specific slot from the last pick (e.g. to fix a
++   mis-placed point without redoing the other two), not as the only way
++   to set a point.
++
++   Each point is stored as (product, localHitPos) -- the pick's local-space
++   position within whatever product it landed on -- rather than a single
++   cached world-space position. Rotating/panning in this viewer moves the
++   *product* (see the arcball/pan code above setting _scene.models()[0]'s
++   own model matrix), not the camera, so a world-space position captured
++   at pick time goes stale the moment the user rotates again: the point
++   stays fixed in world space while the surface it was picked on moves out
++   from under it. Re-deriving the world position every frame via the
++   product's *current* localToWorld() keeps the point visually attached to
++   the surface no matter how the model has since been rotated/panned.
+ 
+    Distances/coordinates here are in FILE UNITS, not millimeters. PRC does
+    carry a per-file CAD-unit scale (units_from_CAD_flag/units_from_CAD_file
+@@ -369,11 +393,32 @@ static bool pickTriangleAtScreenPoint(int mouseX, int mouseY, int viewportW,
+ struct MeasurePoint
+ {
+     bool valid;
+-    Vector3 pos;
++    Product *product;
++    Vector3 localPos;
+ };
+ 
+ static MeasurePoint g_measurePoints[3] = { { false }, { false }, { false } };
+ 
++/* The point's world-space position *right now*, re-derived from its
++   product's current transform rather than a stale cached value -- see the
++   MeasurePoint comment above. */
++static Vector3 measurePointWorldPos(const MeasurePoint &mp)
++{
++    if (mp.product == nullptr)
++        return mp.localPos;
++    return transformPoint(mp.product->localToWorld(), mp.localPos);
++}
++
++/* First index in g_measurePoints that isn't set yet, or -1 if A/B/C are
++   all already occupied. */
++static int firstEmptyMeasureSlot()
++{
++    for (int i = 0; i < 3; i++)
++        if (!g_measurePoints[i].valid)
++            return i;
++    return -1;
++}
++
+ static bool worldToScreen(const Vector3 &worldPos, int viewportW, int viewportH, ImVec2 *out)
+ {
+     Matrix4 vp = _camera.projection() * _camera.view();
+@@ -458,9 +503,10 @@ static void drawTrianglePickOverlay()
+ 
+ /* Screen-space crosshairs at each set measurement point, plus connecting
+    lines with an inline distance/angle label -- drawn straight onto ImGui's
+-   foreground draw list (no 3D geometry, no new render pass) so a point
+-   stays visually anchored to the model as the camera moves, the same way
+-   the rest of this viewer's picking feedback works. */
++   foreground draw list (no 3D geometry, no new render pass). Each point's
++   world position is re-derived every frame via measurePointWorldPos() (see
++   MeasurePoint above), so it stays visually anchored to the surface it was
++   picked on as the model is rotated/panned, not just as the camera moves. */
+ static void drawMeasureOverlay(int viewportW, int viewportH)
+ {
+     static const ImU32 kPointColor[3] = {
+@@ -470,6 +516,7 @@ static void drawMeasureOverlay(int viewportW, int viewportH)
+     };
+ 
+     ImDrawList *draw = ImGui::GetForegroundDrawList();
++    Vector3 worldPos[3];
+     ImVec2 screen[3];
+     bool onScreen[3] = { false, false, false };
+ 
+@@ -477,7 +524,8 @@ static void drawMeasureOverlay(int viewportW, int viewportH)
+     {
+         if (!g_measurePoints[i].valid)
+             continue;
+-        onScreen[i] = worldToScreen(g_measurePoints[i].pos, viewportW, viewportH, &screen[i]);
++        worldPos[i] = measurePointWorldPos(g_measurePoints[i]);
++        onScreen[i] = worldToScreen(worldPos[i], viewportW, viewportH, &screen[i]);
+         if (onScreen[i])
+         {
+             draw->AddCircleFilled(screen[i], 5.0f, kPointColor[i]);
+@@ -488,7 +536,7 @@ static void drawMeasureOverlay(int viewportW, int viewportH)
+ 
+     if (g_measurePoints[0].valid && g_measurePoints[1].valid)
+     {
+-        float dist = length(g_measurePoints[1].pos - g_measurePoints[0].pos);
++        float dist = length(worldPos[1] - worldPos[0]);
+         if (onScreen[0] && onScreen[1])
+         {
+             draw->AddLine(screen[0], screen[1], IM_COL32(255, 255, 0, 200), 1.5f);
+@@ -501,8 +549,8 @@ static void drawMeasureOverlay(int viewportW, int viewportH)
+ 
+     if (g_measurePoints[0].valid && g_measurePoints[1].valid && g_measurePoints[2].valid)
+     {
+-        Vector3 ba = g_measurePoints[0].pos - g_measurePoints[1].pos;
+-        Vector3 bc = g_measurePoints[2].pos - g_measurePoints[1].pos;
++        Vector3 ba = worldPos[0] - worldPos[1];
++        Vector3 bc = worldPos[2] - worldPos[1];
+         float lba = length(ba), lbc = length(bc);
+         if (onScreen[1] && onScreen[2])
+             draw->AddLine(screen[1], screen[2], IM_COL32(255, 255, 0, 200), 1.5f);
+@@ -521,9 +569,11 @@ static void drawMeasureOverlay(int viewportW, int viewportH)
+ static void drawMeasureTab()
+ {
+     ImGui::TextWrapped("Ctrl+LeftClick a point in the viewport (see Triangle "
+-        "Pick), then use a button below to add it as measurement point A, "
+-        "B, or C. Distance uses A/B; angle (at B, between B->A and B->C) "
+-        "needs all three.");
++        "Pick) to drop it into the first empty slot below (A, then B, then "
++        "C). Once all three are set, Ctrl+LeftClick just updates Triangle "
++        "Pick -- use a button below to re-assign a specific point from the "
++        "last pick instead. Distance uses A/B; angle (at B, between B->A "
++        "and B->C) needs all three.");
+     ImGui::TextWrapped("Values are in FILE UNITS, not millimeters -- PRC "
+         "carries a per-file CAD-unit scale, but this project could not "
+         "independently confirm which direction it converts, so it is not "
+@@ -541,15 +591,16 @@ static void drawMeasureTab()
+         if (ImGui::Button(labels[i]))
+         {
+             g_measurePoints[i].valid = true;
+-            g_measurePoints[i].pos = g_lastPick.hitPos;
++            g_measurePoints[i].product = g_lastPick.product;
++            g_measurePoints[i].localPos = g_lastPick.localHitPos;
+         }
+         if (disabled)
+             ImGui::EndDisabled();
+         if (g_measurePoints[i].valid)
+         {
++            Vector3 p = measurePointWorldPos(g_measurePoints[i]);
+             ImGui::SameLine();
+-            ImGui::Text("(%.4f, %.4f, %.4f)", g_measurePoints[i].pos.x,
+-                g_measurePoints[i].pos.y, g_measurePoints[i].pos.z);
++            ImGui::Text("(%.4f, %.4f, %.4f)", p.x, p.y, p.z);
+         }
+         ImGui::PopID();
+     }
+@@ -564,7 +615,7 @@ static void drawMeasureTab()
+ 
+     if (g_measurePoints[0].valid && g_measurePoints[1].valid)
+     {
+-        float dist = length(g_measurePoints[1].pos - g_measurePoints[0].pos);
++        float dist = length(measurePointWorldPos(g_measurePoints[1]) - measurePointWorldPos(g_measurePoints[0]));
+         ImGui::Text("Distance A-B: %.6f file units", dist);
+     }
+     else
+@@ -574,8 +625,11 @@ static void drawMeasureTab()
+ 
+     if (g_measurePoints[0].valid && g_measurePoints[1].valid && g_measurePoints[2].valid)
+     {
+-        Vector3 ba = g_measurePoints[0].pos - g_measurePoints[1].pos;
+-        Vector3 bc = g_measurePoints[2].pos - g_measurePoints[1].pos;
++        Vector3 a = measurePointWorldPos(g_measurePoints[0]);
++        Vector3 b = measurePointWorldPos(g_measurePoints[1]);
++        Vector3 c = measurePointWorldPos(g_measurePoints[2]);
++        Vector3 ba = a - b;
++        Vector3 bc = c - b;
+         float lba = length(ba), lbc = length(bc);
+         if (lba > 1e-9f && lbc > 1e-9f)
+         {
+@@ -1579,7 +1633,8 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+ 
+         /* This is an arcball or trackball implementation for rotating the 3D part
+            with the mouse. Math from Ken Shoemake 1992 */
+-        if ((mouseDown && mouseMoved && !mouse_over_debug) || mouse_wheel_delta != 0)
++        bool ctrlHeldForRotate = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
++        if ((mouseDown && mouseMoved && !mouse_over_debug && !ctrlHeldForRotate) || mouse_wheel_delta != 0)
+         {
+             Matrix4 mat;
+ 
+@@ -1661,6 +1716,22 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
+                 &g_lastPick))
+             {
+                 printPickResult(g_lastPick);
++
++                /* Drop straight into the first open Measure slot so
++                   Ctrl+LeftClick alone is enough for the common case of
++                   setting A, then B, then C. Once all three are full,
++                   further picks only update Triangle Pick/g_lastPick --
++                   the Measure tab's "Set Point X" buttons are what
++                   re-assigns a specific slot after that, so an unrelated
++                   inspection click elsewhere can't silently clobber an
++                   already-placed point. */
++                int slot = firstEmptyMeasureSlot();
++                if (slot >= 0)
++                {
++                    g_measurePoints[slot].valid = true;
++                    g_measurePoints[slot].product = g_lastPick.product;
++                    g_measurePoints[slot].localPos = g_lastPick.localHitPos;
++                }
+             }
+             else
+             {
+-- 
+2.47.3
+
