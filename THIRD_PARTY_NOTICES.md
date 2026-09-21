@@ -51,6 +51,6 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,
-  `scripts/setup.sh`, the `.desktop` entry, and the patches above) is
-  distributed under the same license (AGPLv3, see [LICENSE](LICENSE)) for
-  simplicity.
+  `scripts/setup.sh`, `scripts/build-deb.sh`, the `.desktop` entry, and the
+  patches above), Copyright (C) 2026 theJamess, is distributed under the
+  same license (AGPLv3, see [LICENSE](LICENSE)) for simplicity.

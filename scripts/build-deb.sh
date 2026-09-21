@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 theJamess
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at your
+# option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero
+# General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Builds a self-contained .deb package of the 3D PDF Viewer.
 #
 # This is a SEPARATE build from scripts/setup.sh's dev build: it forces
@@ -110,6 +125,10 @@ cat > "$STAGING/usr/share/doc/3dpdf-viewer/copyright" <<'EOF'
 This package (3dpdf-viewer) wraps nanoPRC (https://github.com/mvrhel/nanoPRC),
 vendored as a git submodule and modified by the patches/ directory of the
 source repository this package was built from.
+
+This project's own files (bin/3dpdf-view, scripts/setup.sh,
+scripts/build-deb.sh, and this package's own build/packaging logic):
+Copyright (C) 2026 theJamess.
 
 Both this package's own code and nanoPRC are licensed under the GNU
 Affero General Public License v3.0 (AGPLv3). The full license text and a

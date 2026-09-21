@@ -41,8 +41,8 @@ nanoPRC is licensed under AGPLv3 — see [LICENSE](LICENSE) and
 **Option A — build from source:**
 
 ```bash
-git clone --recurse-submodules <this repo>
-cd <this repo>
+git clone --recurse-submodules https://github.com/theJamess/3dpdf-viewer.git
+cd 3dpdf-viewer
 ./scripts/setup.sh
 ```
 
@@ -298,3 +298,11 @@ Section tab's clipping plane cutting into the cube), `screenshots/06-measure-
 distance-angle.png` (the Measure tab with three points picked on the cube,
 showing both the panel readout and the in-viewport distance/angle overlay)
 — all rendered from this repo's own build against the bundled example PDFs.
+
+## License
+
+Copyright (C) 2026 theJamess. This program is free software: you can
+redistribute it and/or modify it under the terms of the GNU Affero
+General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version.
+See [LICENSE](LICENSE).
