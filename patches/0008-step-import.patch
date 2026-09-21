@@ -1,4 +1,4 @@
-From 8fd29c958df18544630e3daee747b93a4056a753 Mon Sep 17 00:00:00 2001
+From 89cfa40156497b5db811105940463947ed439a8b Mon Sep 17 00:00:00 2001
 From: 3dpdf <3dpdf@users.noreply.github.com>
 Date: Mon, 21 Sep 2026 13:18:53 -0500
 Subject: [PATCH] Add File > Import from STEP to the viewer, bridging
@@ -83,22 +83,22 @@ if they hit the same misreading.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 ---
- CMakeLists.txt                        |  18 ++
- demos/viewer/CMakeLists.txt           |  25 +++
+ CMakeLists.txt                        |  42 ++++
+ demos/viewer/CMakeLists.txt           |  29 +++
  demos/viewer/src/main.cpp             | 171 ++++++++++++++-
  demos/viewer/src/step_import.cpp      | 297 ++++++++++++++++++++++++++
  demos/viewer/src/step_import.h        |  53 +++++
  demos/viewer/src/step_import_stub.cpp |  36 ++++
- 6 files changed, 599 insertions(+), 1 deletion(-)
+ 6 files changed, 627 insertions(+), 1 deletion(-)
  create mode 100644 demos/viewer/src/step_import.cpp
  create mode 100644 demos/viewer/src/step_import.h
  create mode 100644 demos/viewer/src/step_import_stub.cpp
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index caea610..4571f87 100644
+index caea610..56e3511 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -38,11 +38,29 @@ option(NANOPRC_BUILD_TESTS "Build nanoPRC tests" ON)
+@@ -38,11 +38,53 @@ option(NANOPRC_BUILD_TESTS "Build nanoPRC tests" ON)
  option(NANOPRC_BUILD_SDL "Build SDL dependency (needed for viewer demos)" ON)
  option(NANOPRC_USE_SYSTEM_SDL "Prefer an already-installed SDL3 over building the vendored copy from source" ON)
  option(NANOPRC_ENABLE_WINDOWS_GAMEINPUT "Enable SDL GameInput integration on Windows (requires gameinput.h)" OFF)
@@ -118,8 +118,32 @@ index caea610..4571f87 100644
 +if (NANOPRC_BUILD_DEMOS AND NANOPRC_ENABLE_STEP_IMPORT)
 +	find_package(OpenCASCADE QUIET CONFIG)
 +	if (OpenCASCADE_FOUND)
-+		set(NANOPRC_OCCT_FOUND TRUE)
-+		message(STATUS "nanoPRC: found OpenCASCADE (${OpenCASCADE_INCLUDE_DIR}) -- viewer's STEP import will be enabled")
++		# find_package succeeding says OCCT exists -- NOT that it spells the
++		# STEP library the way we expect. OCCT 7.8 consolidated the STEP
++		# data-exchange libraries (TKSTEP, TKSTEPBase, TKSTEPAttr, TKSTEP209)
++		# into a single TKDESTEP, while Debian/Ubuntu still ship 7.6. Naming
++		# one of them unconditionally builds fine on a newer developer machine
++		# and then fails at LINK time on every LTS and on CI, long after the
++		# "found OpenCASCADE" line has already printed. Resolve the real name.
++		find_library(NANOPRC_OCCT_STEP_LIB
++			NAMES TKDESTEP TKSTEP
++			HINTS ${OpenCASCADE_LIBRARY_DIR})
++		if (NANOPRC_OCCT_STEP_LIB)
++			get_filename_component(NANOPRC_OCCT_STEP_NAME "${NANOPRC_OCCT_STEP_LIB}" NAME_WE)
++			string(REGEX REPLACE "^lib" "" NANOPRC_OCCT_STEP_NAME "${NANOPRC_OCCT_STEP_NAME}")
++			if (NANOPRC_OCCT_STEP_NAME STREQUAL "TKSTEP")
++				# The pre-7.8 split: name the siblings explicitly rather than
++				# rely on TKSTEP pulling them, since --as-needed (the default
++				# on Debian/Ubuntu) drops indirectly-referenced shared libs.
++				set(NANOPRC_OCCT_STEP_LIBS TKSTEP TKSTEPBase TKSTEPAttr TKSTEP209)
++			else()
++				set(NANOPRC_OCCT_STEP_LIBS TKDESTEP)
++			endif()
++			set(NANOPRC_OCCT_FOUND TRUE)
++			message(STATUS "nanoPRC: found OpenCASCADE (${OpenCASCADE_INCLUDE_DIR}), STEP via ${NANOPRC_OCCT_STEP_NAME} -- viewer's STEP import will be enabled")
++		else()
++			message(STATUS "nanoPRC: OpenCASCADE found but it provides no STEP library (looked for TKDESTEP and TKSTEP) -- viewer's File > Import from STEP will report unavailable at runtime")
++		endif()
 +	else()
 +		message(STATUS "nanoPRC: OpenCASCADE not found -- viewer's File > Import from STEP will report unavailable at runtime (install libocct-data-exchange-dev to enable)")
 +	endif()
@@ -129,7 +153,7 @@ index caea610..4571f87 100644
  # find_package's imported targets are only visible in the directory scope
  # that called it and that scope's children, and demos/viewer (added below,
 diff --git a/demos/viewer/CMakeLists.txt b/demos/viewer/CMakeLists.txt
-index fa1b60c..b121c44 100644
+index fa1b60c..0a05244 100644
 --- a/demos/viewer/CMakeLists.txt
 +++ b/demos/viewer/CMakeLists.txt
 @@ -3,6 +3,18 @@ project(nano_prc_viewer)
@@ -159,7 +183,7 @@ index fa1b60c..b121c44 100644
      glad/src/glad.c
  	../../thirdparty/imgui/imgui.cpp
  	../../thirdparty/imgui/imgui_draw.cpp
-@@ -29,6 +42,18 @@ add_executable(nano_prc_viewer
+@@ -29,6 +42,22 @@ add_executable(nano_prc_viewer
  target_link_libraries(nano_prc_viewer PRIVATE nano_prc)
  target_link_libraries(nano_prc_viewer PRIVATE SDL3::SDL3)
  
@@ -170,8 +194,12 @@ index fa1b60c..b121c44 100644
 +	# ${OpenCASCADE_LIBRARIES} list (which includes visualization, OCAF,
 +	# every other DE format's import/export, and DRAW/test modules this
 +	# viewer has no use for).
++	# NANOPRC_OCCT_STEP_LIBS, not a literal: the STEP library is TKDESTEP on
++	# OCCT >= 7.8 and TKSTEP (plus siblings) before it. The top-level
++	# CMakeLists.txt resolves which one this machine actually has.
 +	target_link_libraries(nano_prc_viewer PRIVATE
-+		TKDESTEP TKXCAF TKXSBase TKMesh TKTopAlgo TKBRep TKGeomAlgo TKGeomBase
++		${NANOPRC_OCCT_STEP_LIBS}
++		TKXCAF TKXSBase TKMesh TKTopAlgo TKBRep TKGeomAlgo TKGeomBase
 +		TKG3d TKG2d TKMath TKernel TKLCAF TKCAF TKCDF TKV3d TKService TKVCAF)
 +endif()
 +
@@ -793,5 +821,5 @@ index 0000000..5ecbf07
 +    return false;
 +}
 -- 
-2.47.3
+2.43.0
 

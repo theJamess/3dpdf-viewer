@@ -128,7 +128,11 @@ patchelf --set-rpath '$ORIGIN' "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer"
 # machine without it still produces a working .deb with one less feature,
 # never a package that claims a dependency it doesn't need.
 EXTRA_DEPENDS=""
-if ldd "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer" 2>/dev/null | grep -qi "libTKDESTEP"; then
+# Either spelling: the STEP library is libTKDESTEP on OCCT >= 7.8 and libTKSTEP before it (see the
+# resolution in nanoPRC's top-level CMakeLists.txt, patches/0008). Matching only the newer name here
+# would silently ship a .deb that HAS STEP import linked in but declares none of its OCCT runtime
+# dependencies -- which installs cleanly and then fails to start on the user's machine.
+if ldd "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer" 2>/dev/null | grep -qiE "libTKDESTEP|libTKSTEP"; then
     echo "==> STEP import is linked in -- resolving its extra runtime packages"
     EXTRA_LIBS="$(ldd "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer" | awk '{print $3}' | grep -E '/libTK|/libfontconfig|/libtbb' || true)"
     EXTRA_PKGS=""
