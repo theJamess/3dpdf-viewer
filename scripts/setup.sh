@@ -7,6 +7,36 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NANOPRC_DIR="$REPO_ROOT/third_party/nanoPRC"
 BUILD_DIR="$NANOPRC_DIR/build"
 
+# This script only knows how to drive apt (Debian/Ubuntu and derivatives).
+# Fail with a clear, specific message on anything else rather than let the
+# first `sudo apt-get ...` below produce a bare "command not found" that
+# doesn't say what's actually wrong or what to do about it.
+if ! command -v apt-get >/dev/null 2>&1; then
+    echo "3dpdf-view setup: this script only supports Debian/Ubuntu (apt-based) systems." >&2
+    echo "" >&2
+    if command -v dnf >/dev/null 2>&1; then
+        echo "Detected dnf (Fedora/RHEL-family) -- not supported by this script." >&2
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "Detected pacman (Arch-family) -- not supported by this script." >&2
+    elif command -v zypper >/dev/null 2>&1; then
+        echo "Detected zypper (openSUSE) -- not supported by this script." >&2
+    elif command -v apk >/dev/null 2>&1; then
+        echo "Detected apk (Alpine) -- not supported by this script." >&2
+    else
+        echo "Could not detect a known package manager on this system." >&2
+    fi
+    echo "" >&2
+    echo "There is no automated setup for your distro yet. You can still build" >&2
+    echo "manually: nanoPRC just needs CMake + a C/C++ toolchain + SDL3's own" >&2
+    echo "build dependencies (see https://wiki.libsdl.org/SDL3/README-linux for" >&2
+    echo "the equivalent package names on your distro), then:" >&2
+    echo "  git submodule update --init --recursive" >&2
+    echo "  for p in patches/*.patch; do git -C third_party/nanoPRC am \"\$p\"; done" >&2
+    echo "  cmake -S third_party/nanoPRC -B third_party/nanoPRC/build -DCMAKE_BUILD_TYPE=Release" >&2
+    echo "  cmake --build third_party/nanoPRC/build --target nano_prc_viewer" >&2
+    exit 1
+fi
+
 echo "==> Installing build dependencies (apt, needs sudo)"
 sudo apt-get update -qq
 sudo apt-get install -y -qq cmake build-essential git pkg-config \
@@ -60,6 +90,15 @@ cmake -S "$NANOPRC_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
 
 echo "==> Building nano_prc_viewer (skips SDL3 if libsdl3-dev was found above; ~15s vs ~2min from source)"
 cmake --build "$BUILD_DIR" --target nano_prc_viewer -- -j"$(nproc)"
+
+echo "==> Installing app icon (~/.local/share/icons/hicolor)"
+for size in 16 32 48 64 128 256; do
+    icon_dir="$HOME/.local/share/icons/hicolor/${size}x${size}/apps"
+    mkdir -p "$icon_dir"
+    cp "$REPO_ROOT/desktop/icons/3dpdf-viewer-${size}.png" "$icon_dir/3dpdf-viewer.png"
+done
+command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+    gtk-update-icon-cache -q -t -f "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 echo "==> Installing desktop entry (~/.local/share/applications)"
 mkdir -p "$HOME/.local/share/applications"

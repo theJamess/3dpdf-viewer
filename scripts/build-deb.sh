@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Builds a self-contained .deb package of the 3D PDF Viewer.
+#
+# This is a SEPARATE build from scripts/setup.sh's dev build: it forces
+# nanoPRC to compile its OWN static SDL3 from source (-DNANOPRC_USE_SYSTEM_
+# SDL=OFF -DSDL_SHARED=OFF -DSDL_STATIC=ON) instead of preferring whatever
+# SDL3 package the build machine happens to have (patches/0004's normal,
+# faster default). A .deb built against the local machine's system SDL3
+# would need a matching `libsdl3-0` runtime package on every machine that
+# installs it -- and per patches/0004's own comment, most current Ubuntu
+# releases don't package SDL3 at all yet, which would make the .deb
+# uninstallable on exactly the systems it's meant to reach. Statically
+# linking it instead means the package brings its own copy and has no such
+# dependency at all -- verified with `ldd` (see this script's own checks
+# below) to carry no libSDL3.so requirement.
+#
+# Usage: scripts/build-deb.sh
+# Output: dist/3dpdf-viewer_<version>_amd64.deb
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NANOPRC_DIR="$REPO_ROOT/third_party/nanoPRC"
+BUILD_DIR="$NANOPRC_DIR/build-deb"
+DIST_DIR="$REPO_ROOT/dist"
+VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
+ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+PKG_NAME="3dpdf-viewer"
+STAGING="$DIST_DIR/staging"
+
+for tool in dpkg-deb patchelf; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "build-deb.sh: '$tool' is required (sudo apt-get install -y $tool) and wasn't found." >&2
+        exit 1
+    fi
+done
+
+echo "==> Installing build dependencies (same as scripts/setup.sh, minus libsdl3-dev on purpose)"
+sudo apt-get update -qq
+sudo apt-get install -y -qq cmake build-essential git pkg-config \
+    libpng-dev libjpeg-dev zlib1g-dev
+sudo apt-get install -y -qq \
+    libasound2-dev libpulse-dev libjack-dev libsndio-dev \
+    libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+    libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
+    libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libglu1-mesa-dev \
+    libdbus-1-dev libudev-dev libusb-1.0-0-dev
+sudo apt-get install -y -qq \
+    libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev \
+    || echo "    (skipped one or more optional Wayland/pipewire packages -- not fatal)"
+
+echo "==> Fetching nanoPRC submodule + applying patches"
+cd "$REPO_ROOT"
+git submodule update --init --recursive
+for patch in "$REPO_ROOT"/patches/*.patch; do
+    [ -e "$patch" ] || continue
+    if git -C "$NANOPRC_DIR" apply --check "$patch" 2>/dev/null; then
+        git -C "$NANOPRC_DIR" am --keep-non-patch "$patch"
+    elif git -C "$NANOPRC_DIR" apply --reverse --check "$patch" 2>/dev/null; then
+        : # already applied
+    else
+        echo "build-deb.sh: WARNING: $(basename "$patch") does not apply cleanly -- skipping." >&2
+    fi
+done
+
+echo "==> Configuring (forcing a static, self-contained SDL3 build)"
+mkdir -p "$BUILD_DIR"
+cmake -S "$NANOPRC_DIR" -B "$BUILD_DIR" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DNANOPRC_USE_SYSTEM_SDL=OFF \
+    -DSDL_SHARED=OFF -DSDL_STATIC=ON
+
+echo "==> Building nano_prc_viewer"
+cmake --build "$BUILD_DIR" --target nano_prc_viewer -- -j"$(nproc)"
+
+VIEWER_BIN="$BUILD_DIR/bin/nano_prc_viewer"
+NANO_PRC_LIB="$BUILD_DIR/lib/libnano_prc.so"
+[ -x "$VIEWER_BIN" ] || { echo "build-deb.sh: build did not produce $VIEWER_BIN" >&2; exit 1; }
+[ -f "$NANO_PRC_LIB" ] || { echo "build-deb.sh: build did not produce $NANO_PRC_LIB" >&2; exit 1; }
+
+echo "==> Staging package tree"
+rm -rf "$STAGING"
+mkdir -p "$STAGING/DEBIAN" \
+    "$STAGING/usr/lib/3dpdf-viewer" \
+    "$STAGING/usr/bin" \
+    "$STAGING/usr/share/applications" \
+    "$STAGING/usr/share/doc/3dpdf-viewer"
+
+install -m755 "$VIEWER_BIN" "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer"
+install -m755 "$NANO_PRC_LIB" "$STAGING/usr/lib/3dpdf-viewer/libnano_prc.so"
+
+# The binary's build-time RPATH points at $BUILD_DIR (an absolute path that
+# won't exist on the machine that installs this package) -- point it at its
+# own install directory instead so it finds the bundled libnano_prc.so
+# wherever the package actually lands.
+patchelf --set-rpath '$ORIGIN' "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer"
+
+install -m755 "$REPO_ROOT/bin/3dpdf-view" "$STAGING/usr/bin/3dpdf-view"
+
+sed "s#REPO_ROOT/bin/3dpdf-view#/usr/bin/3dpdf-view#" \
+    "$REPO_ROOT/desktop/3dpdf-viewer.desktop" \
+    > "$STAGING/usr/share/applications/3dpdf-viewer.desktop"
+
+for size in 16 32 48 64 128 256; do
+    icon_dir="$STAGING/usr/share/icons/hicolor/${size}x${size}/apps"
+    mkdir -p "$icon_dir"
+    install -m644 "$REPO_ROOT/desktop/icons/3dpdf-viewer-${size}.png" "$icon_dir/3dpdf-viewer.png"
+done
+
+cat > "$STAGING/usr/share/doc/3dpdf-viewer/copyright" <<'EOF'
+This package (3dpdf-viewer) wraps nanoPRC (https://github.com/mvrhel/nanoPRC),
+vendored as a git submodule and modified by the patches/ directory of the
+source repository this package was built from.
+
+Both this package's own code and nanoPRC are licensed under the GNU
+Affero General Public License v3.0 (AGPLv3). The full license text and a
+detailed account of every modification made to nanoPRC are included in the
+source repository as LICENSE and THIRD_PARTY_NOTICES.md -- see the
+project's README for where to find it.
+
+nanoPRC itself bundles SDL3, Dear ImGui, MatrixUtil, and zlib; see
+nanoPRC's own THIRD_PARTY_NOTICES.md in that repository for their licenses.
+EOF
+gzip -9 -n -c "$REPO_ROOT/README.md" > "$STAGING/usr/share/doc/3dpdf-viewer/README.md.gz" 2>/dev/null || \
+    cp "$REPO_ROOT/README.md" "$STAGING/usr/share/doc/3dpdf-viewer/README.md"
+
+INSTALLED_SIZE_KB="$(du -sk "$STAGING/usr" | cut -f1)"
+
+cat > "$STAGING/DEBIAN/control" <<EOF
+Package: $PKG_NAME
+Version: $VERSION
+Section: graphics
+Priority: optional
+Architecture: $ARCH
+Installed-Size: $INSTALLED_SIZE_KB
+Depends: libc6, libstdc++6, libx11-6, libgl1
+Recommends: zenity
+Maintainer: 3D PDF Viewer project
+Description: View and rotate 3D models embedded in PDF files
+ A desktop viewer for PDFs that contain an embedded PRC 3D model (the
+ kind produced by CAD/engineering tools such as Tetra4D, 3D-Tool,
+ SolidWorks' 3D-PDF export, and CAD Exchanger). Supports rotate, pan,
+ zoom, cross-sections, and point-to-point measurement.
+ .
+ Wraps nanoPRC (AGPLv3, https://github.com/mvrhel/nanoPRC) -- see
+ /usr/share/doc/3dpdf-viewer/copyright.
+EOF
+
+cat > "$STAGING/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database -q /usr/share/applications || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+exit 0
+EOF
+chmod 755 "$STAGING/DEBIAN/postinst"
+
+echo "==> Verifying the packaged binary carries no libSDL3.so runtime dependency"
+if ldd "$STAGING/usr/lib/3dpdf-viewer/nano_prc_viewer" 2>/dev/null | grep -qi sdl3; then
+    echo "build-deb.sh: packaged binary still links libSDL3.so -- static SDL3 build did not take effect as expected." >&2
+    exit 1
+fi
+
+echo "==> Building the .deb"
+mkdir -p "$DIST_DIR"
+DEB_PATH="$DIST_DIR/${PKG_NAME}_${VERSION}_${ARCH}.deb"
+dpkg-deb --root-owner-group --build "$STAGING" "$DEB_PATH"
+rm -rf "$STAGING"
+
+echo "==> Done: $DEB_PATH"
+dpkg-deb --info "$DEB_PATH"

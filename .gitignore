@@ -1,5 +1,7 @@
 third_party/nanoPRC/build/
 third_party/nanoPRC/build-debug/
+third_party/nanoPRC/build-deb/
+dist/
 viewer.ini
 imgui.ini
 uploads/

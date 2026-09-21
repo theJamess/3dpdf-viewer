@@ -36,7 +36,9 @@ given, and launches it.
 nanoPRC is licensed under AGPLv3 — see [LICENSE](LICENSE) and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Setup (Ubuntu)
+## Setup (Ubuntu/Debian)
+
+**Option A — build from source:**
 
 ```bash
 git clone --recurse-submodules <this repo>
@@ -45,10 +47,10 @@ cd <this repo>
 ```
 
 This installs build dependencies via `apt`, builds `nano_prc_viewer` from
-the vendored submodule, installs a "3D PDF Viewer" entry into your
-applications menu, and symlinks `bin/3dpdf-view` into `~/.local/bin` so
-the `3dpdf-view` command works from any directory (add `~/.local/bin` to
-your `PATH` if it isn't already — the script tells you whether it is).
+the vendored submodule, installs a "3D PDF Viewer" entry (with icon) into
+your applications menu, and symlinks `bin/3dpdf-view` into `~/.local/bin`
+so the `3dpdf-view` command works from any directory (add `~/.local/bin`
+to your `PATH` if it isn't already — the script tells you whether it is).
 
 If you already cloned without `--recurse-submodules`, run
 `git submodule update --init --recursive` first, or just run
@@ -59,6 +61,25 @@ Takes well under a minute on a system that has `libsdl3-dev` available
 older releases that don't, since it falls back to compiling SDL3 from
 source. Either way, this exact flow is checked on every push by
 `.github/workflows/build.yml` against both cases (see "Patches" below).
+
+Only Debian/Ubuntu (apt-based) systems are supported — `setup.sh` detects
+other package managers (dnf, pacman, zypper, apk) and fails with a clear
+message and manual-build pointers rather than a bare command-not-found.
+
+**Option B — install a pre-built `.deb`:** grab one from a
+[GitHub Actions run](../../actions/workflows/build.yml) (the `3dpdf-viewer-deb`
+artifact) or build it yourself:
+
+```bash
+./scripts/build-deb.sh          # produces dist/3dpdf-viewer_<version>_amd64.deb
+sudo dpkg -i dist/*.deb
+```
+
+No compiler needed on the machine that installs it — `build-deb.sh`
+compiles nanoPRC's SDL3 dependency statically into the binary rather than
+relying on the target system's own SDL3 packaging (which, per the note
+above, most current Ubuntu releases don't have yet), so the package has
+no `libsdl3-0`-style runtime dependency to satisfy.
 
 ## Usage
 
@@ -71,6 +92,12 @@ source. Either way, this exact flow is checked on every push by
 "3D PDF Viewer" from your applications menu. If you haven't run
 `scripts/setup.sh` yet, `bin/3dpdf-view path/to/model.pdf` from the repo
 root works the same way.
+
+The applications-menu entry also registers as an "Open With" option for
+any PDF (there's no separate "3D PDF" file type to register against
+instead), so it'll show up for regular 2D PDFs too — opening one of those
+shows a clear dialog explaining this viewer only handles PDFs with an
+embedded 3D model, rather than silently doing nothing.
 
 **Mouse:**
 - **Left-click drag** — rotate/orbit the model (arcball/trackball rotation)
