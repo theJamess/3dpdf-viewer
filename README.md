@@ -326,30 +326,32 @@ this pattern.
 
 ## Screenshots
 
-All rendered from this repo's own build against the bundled example PDFs in
-`third_party/nanoPRC/examples/`.
+All rendered from this repo's own build, from a real CAD part (a filament
+sensor bracket, originally a multi-solid STEP export) brought in via
+**File > Import from STEP** rather than one of nanoPRC's bundled toy
+examples.
 
-**`cube.pdf`, as first opened**
+**As first opened, right after importing the STEP file**
 
-![A white cube with a magenta top face on a grey background, lit from above](screenshots/01-cube.png)
+![A tan CAD bracket part with rounded ends, mounting holes, and a cutout in the middle, on a grey background](screenshots/01-filament-sensor.png)
 
 **Mid-rotation, via left-mouse drag**
 
-![A magenta cylinder tilted off its starting axis part-way through a drag rotation](screenshots/02-rotated-cylinder.png)
+![The same bracket part tilted to a different angle part-way through a drag rotation](screenshots/02-rotated-filament-sensor.png)
 
-**`triangle.pdf`**
+**File > Import from STEP**
 
-![A flat yellow triangle on a grey background](screenshots/03-triangle.png)
+![The File menu open, showing the single "Import from STEP..." item, over the bracket part](screenshots/03-import-from-step-menu.png)
 
 **Mid-pan, via middle-mouse drag**
 
-![The magenta cylinder shifted right of centre by a pan, with the F1 control-hint caption visible at the bottom left](screenshots/04-panned-cylinder.png)
+![The bracket part shifted right of centre by a pan, with the F1 control-hint caption visible at the bottom left](screenshots/04-panned-filament-sensor.png)
 
-**The Section tab's clipping plane, cutting into the cube**
+**The Section tab's clipping plane, cutting into the part**
 
-![The cube with the Section tab's clipping plane applied](screenshots/05-cross-section.png)
+![The bracket part with the Section tab's clipping plane applied, revealing internal walls that aren't visible from outside](screenshots/05-cross-section.png)
 
-**The Measure tab, with three points picked on the cube**
+**The Measure tab, with three points picked on the part**
 
 ![The Measure tab with points A, B and C picked, the panel reporting the A-B distance and the angle at B, and the same values drawn as an overlay in the viewport](screenshots/06-measure-distance-angle.png)
 
