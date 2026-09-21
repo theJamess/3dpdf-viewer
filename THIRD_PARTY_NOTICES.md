@@ -56,6 +56,16 @@ Vendored as a git submodule at `third_party/nanoPRC`, pinned to commit
     tessellate) into nanoPRC's own pre-existing write API, which this
     patch does not modify. See README.md's "Controls" section for scope
     (geometry only) and the "OpenCASCADE" notice below for its license.
+  - `patches/0009-fix-measure-tracking-and-click-rotation.patch` fixes two
+    bugs in `patches/0006`'s Measure tab (`demos/viewer/src/main.cpp`):
+    measured points were stored as a cached world-space position that went
+    stale (visibly detaching from the part) the moment the model was
+    rotated again, since rotating/panning here moves the product, not the
+    camera; and Ctrl+LeftClick-to-pick shared the arcball's rotate
+    condition with no minimum-drag threshold, so ordinary mouse jitter
+    during a click nudged the model. Also changes Ctrl+LeftClick to drop
+    straight into the first empty A/B/C slot instead of requiring a
+    separate button click every time.
   Everything else (parsing, rendering, the rest of the viewer) is unmodified
   upstream nanoPRC.
 - This repository's own code (the `bin/3dpdf-view` wrapper script,
